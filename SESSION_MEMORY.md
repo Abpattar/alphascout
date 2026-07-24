@@ -1,5 +1,5 @@
 # AlphaScout Session Memory
-**Last Updated:** 2025-07-21 (Session 5)
+**Last Updated:** 2025-07-24 (Session 6)
 **Project Root:** `/home/neo/Codes/alphascout`
 
 ---
@@ -11,6 +11,25 @@ Build "AlphaScout" — a multi-sector small-cap news→trade signal bot that:
 - Generates buy/sell signals for stocks
 - 3-7 day holding period, min 10% upside, R:R minimum 2:1
 - Sends signals to Telegram
+
+---
+
+## GitHub Repository
+- **URL**: https://github.com/Abpattar/alphascout
+- **Visibility**: Public
+- **Branch**: master
+- **Initial commit**: 24 files, 6480 insertions
+- **GitHub User**: Abpattar
+
+### Git Setup
+- `gh` CLI: `~/.local/bin/gh`
+- Token stored: `~/.config/gh/hosts.yml`
+- Credential helper: `!gh auth git-credential`
+- `.gitignore` excludes: `venv/`, `.env`, `data/*.json`, `__pycache__/`, `*.enc`, `credentials.*`
+
+### GitHub Actions (for future)
+- Token has `repo` scope — can create repos and push
+- Missing `read:org` scope (harmless, only for org features)
 
 ---
 
@@ -41,6 +60,12 @@ Build "AlphaScout" — a multi-sector small-cap news→trade signal bot that:
 8. ✅ **Fixed triage prompt** — Removed "old news" and "general discussion" filters that were too aggressive
 9. ✅ **Reduced timeouts** — Provider timeouts: 60s→20s, article analysis: 120s→60s, batch timeout: 60s→90s
 10. ✅ **Added `scan` command** — Screener-first approach (NSE gainers → Screener.in → Trendlyne → match to news)
+
+### Session 6 Changes
+1. ✅ **Created GitHub repository** — https://github.com/Abpattar/alphascout (public)
+2. ✅ **Installed `gh` CLI** — Located at `~/.local/bin/gh`, version 2.67.0
+3. ✅ **Configured git credentials** — Token stored in `~/.config/gh/hosts.yml`, credential helper set to `!gh auth git-credential`
+4. ✅ **Initial push** — 24 files, 6480 insertions (excluded venv, .env, credentials, cache files)
 
 ### Production Test Results
 ```
@@ -184,7 +209,11 @@ If any niche sources return 0 articles:
 - We hit limit today (~50 articles = ~100K tokens)
 - **Fix**: Use Cerebras/OpenRouter/Gemini more, reduce article count, or get more API keys
 
-### 4. Remaining Features
+### 4. GitHub Actions CI/CD (Optional)
+- Add `.github/workflows/` for automated testing
+- Set up scheduled runs (e.g., daily market scan at 9:30 AM IST)
+
+### 5. Remaining Features
 - Zerodha integration (needs API keys)
 - Backtesting (need more signals first)
 - Scheduler testing
@@ -204,6 +233,10 @@ If any niche sources return 0 articles:
 ### Session 4
 - `src/scraping/scraper.py` — **Refactored to config-driven** (reads from `sources.yaml`)
 - `config/sources.yaml` — **Added 6 niche small-cap sources** + expanded to 25 total
+
+### Session 6
+- `.gitignore` — Created (excludes venv, .env, data/*.json, __pycache__, credentials)
+- `SESSION_MEMORY.md` — Updated with GitHub setup
 
 ---
 
@@ -227,4 +260,11 @@ for a in articles[:10]:
     matches = [t for t in tickers if t in universe]
     print(f'{'✅' if matches else '❌'} {a.title[:50]} -> {matches}')
 "
+
+# Git commands
+git status                    # Check working tree status
+git add .                     # Stage all changes
+git commit -m "message"       # Commit changes
+git push                      # Push to GitHub
+git pull                      # Pull from GitHub
 ```
