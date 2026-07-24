@@ -1,0 +1,120 @@
+# AlphaScout Configuration
+# All thresholds, schedules, and universe parameters
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SCHEDULE
+# ─────────────────────────────────────────────────────────────────────────────
+schedule:
+  runs_per_day: 2
+  run_times: ["06:30", "16:30"]  # IST
+  timezone: "Asia/Kolkata"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UNIVERSE FILTERS
+# ─────────────────────────────────────────────────────────────────────────────
+universe:
+  price_min: 50
+  price_max: 500
+  market_cap_min_cr: 100
+  market_cap_max_cr: 5000
+  min_avg_daily_volume_lakh: 50
+  max_positions: 5
+  max_per_sector: 2
+  refresh_days: 7
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SIGNAL QUALITY GATES
+# ─────────────────────────────────────────────────────────────────────────────
+signals:
+  min_expected_upside_pct: 10
+  min_expected_upside_pct_fallback: 5
+  min_signals_per_day_for_fallback: 3
+  holding_period_min_days: 3
+  holding_period_max_days: 7
+  min_confidence_manual: 70
+  min_confidence_auto: 90
+  min_risk_reward_ratio: 2.0
+  max_concurrent_positions: 5
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RISK MANAGEMENT
+# ─────────────────────────────────────────────────────────────────────────────
+risk:
+  risk_per_trade_pct: 3.0
+  max_portfolio_risk_pct: 15.0
+  stop_loss_buffer_pct: 0.5
+  trailing_stop_activation_pct: 5.0
+  trailing_stop_distance_pct: 2.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AI ENSEMBLE
+# ─────────────────────────────────────────────────────────────────────────────
+ensemble:
+  models:
+    - name: "groq_70b"
+      provider: "groq"
+      model: "llama-3.3-70b-versatile"
+      weight: 1.0
+      stages: ["triage", "impact", "trade_setup"]
+    - name: "groq_8b"
+      provider: "groq"
+      model: "llama-3.1-8b-instant"
+      weight: 0.7
+      stages: ["triage", "entity_extraction"]
+    - name: "openrouter_qwen"
+      provider: "openrouter"
+      model: "qwen/qwen-2.5-72b-instruct:free"
+      weight: 1.0
+      stages: ["impact", "trade_setup"]
+    - name: "cerebras_70b"
+      provider: "cerebras"
+      model: "llama3.1-70b"
+      weight: 1.0
+      stages: ["impact", "trade_setup"]
+    - name: "gemini_flash"
+      provider: "gemini"
+      model: "gemini-1.5-flash"
+      weight: 0.8
+      stages: ["entity_extraction"]
+  agreement_threshold: 2  # Minimum models agreeing
+  magnitude_tolerance_pct: 3
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PROMPT TOKEN LIMITS
+# ─────────────────────────────────────────────────────────────────────────────
+tokens:
+  triage: 500
+  entity_extraction: 1000
+  impact: 2000
+  trade_setup: 2500
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TECHNICAL ANALYSIS
+# ─────────────────────────────────────────────────────────────────────────────
+technical:
+  enabled: true
+  lookback_days: 60
+  indicators:
+    - "sma_20"
+    - "sma_50"
+    - "rsi_14"
+    - "volume_sma_20"
+    - "atr_14"
+  trend_alignment_required: true
+  rsi_oversold: 30
+  rsi_overbought: 70
+  volume_spike_multiplier: 1.5
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SCRAPING
+# ─────────────────────────────────────────────────────────────────────────────
+scraping:
+  timeout_seconds: 10
+  max_articles_per_source: 20
+  total_timeout_seconds: 60
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    - "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+    - "Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0"
+  dedupe_threshold: 0.85
+  enrich_top_n: 15

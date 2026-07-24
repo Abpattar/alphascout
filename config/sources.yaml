@@ -1,0 +1,438 @@
+# News Sources Configuration
+# 15+ sources across mainstream, government, market-specific, corporate
+
+sources:
+  # MAINSTREAM (8) - RSS + HTML fallback
+  - name: "times_of_india"
+    type: "rss_html"
+    rss_url: "https://timesofindia.indiatimes.com/rssfeeds/1081479906.cms"
+    html_urls:
+      - "https://timesofindia.indiatimes.com/topic/defence"
+      - "https://timesofindia.indiatimes.com/topic/business"
+      - "https://timesofindia.indiatimes.com/topic/markets"
+    selectors: ["h3 a", "h2 a", "a[href*='defence']", "a[href*='business']", "a[href*='market']"]
+    base_url: "https://timesofindia.indiatimes.com"
+    enabled: true
+    category: "mainstream"
+    rate_limit: 10
+
+  - name: "the_print"
+    type: "rss_html"
+    rss_url: "https://theprint.in/feed/"
+    html_urls:
+      - "https://theprint.in/category/defence/"
+      - "https://theprint.in/category/economy/"
+      - "https://theprint.in/category/india/"
+    selectors: ["h3 a", "h2 a", ".entry-title a"]
+    base_url: "https://theprint.in"
+    enabled: true
+    category: "mainstream"
+    rate_limit: 10
+
+  - name: "news18"
+    type: "rss_html"
+    rss_url: "https://www.news18.com/commonfeeds/v1/eng/rss/india.xml"
+    html_urls:
+      - "https://www.news18.com/india/"
+      - "https://www.news18.com/business/"
+    selectors: ["h3 a", "h2 a", "a[href*='defence']", "a[href*='market']", "a[href*='stock']"]
+    base_url: "https://www.news18.com"
+    enabled: true
+    category: "mainstream"
+    rate_limit: 10
+
+  - name: "indian_express"
+    type: "rss_html"
+    rss_url: "https://indianexpress.com/feed/"
+    html_urls:
+      - "https://indianexpress.com/section/india/"
+      - "https://indianexpress.com/section/business/"
+      - "https://indianexpress.com/section/economy/"
+    selectors: ["h2 a", "h3 a", "a[href*='defence']", "a[href*='market']"]
+    base_url: "https://indianexpress.com"
+    enabled: true
+    category: "mainstream"
+    rate_limit: 10
+
+  - name: "financial_express"
+    type: "rss_html"
+    rss_url: "https://www.financialexpress.com/feed/"
+    html_urls:
+      - "https://www.financialexpress.com/defence/"
+      - "https://www.financialexpress.com/market/"
+      - "https://www.financialexpress.com/economy/"
+    selectors: ["h2 a", "h3 a", ".entry-title a"]
+    base_url: "https://www.financialexpress.com"
+    enabled: true
+    category: "mainstream"
+    rate_limit: 10
+
+  - name: "business_standard"
+    type: "rss_html"
+    rss_url: "https://www.business-standard.com/rss/defence-32.rss"
+    html_urls:
+      - "https://www.business-standard.com/markets"
+      - "https://www.business-standard.com/economy"
+    selectors: ["h2 a", "h3 a", "a[href*='defence']", "a[href*='market']"]
+    base_url: "https://www.business-standard.com"
+    enabled: true
+    category: "mainstream"
+    rate_limit: 5
+    note: "Aggressive blocking - RSS preferred"
+
+  - name: "ndtv"
+    type: "rss_only"
+    rss_url: "https://feeds.feedburner.com/ndtvnews-india-news"
+    enabled: true
+    category: "mainstream"
+    rate_limit: 10
+    note: "Blocks scraping - RSS only"
+
+  - name: "economic_times"
+    type: "rss_html"
+    rss_url: "https://economictimes.indiatimes.com/rssfeedsdefault.cms"
+    html_urls:
+      - "https://economictimes.indiatimes.com/news/defence"
+      - "https://economictimes.indiatimes.com/markets/stocks"
+      - "https://economictimes.indiatimes.com/news/economy"
+    selectors: ["h3 a", "h2 a", "a[href*='defence']", "a[href*='stock']", "a[href*='market']"]
+    base_url: "https://economictimes.indiatimes.com"
+    enabled: true
+    category: "mainstream"
+    rate_limit: 10
+
+  # GOVERNMENT / OFFICIAL (3) - Highest signal quality
+  - name: "pib_defence"
+    type: "rss_html"
+    rss_url: "https://pib.gov.in/RssMain.aspx?ModId=6"
+    html_urls:
+      - "https://pib.gov.in/Pressreleaseshare.aspx?PRID=defence"
+    selectors: ["h3 a", "h2 a", ".release-title a"]
+    base_url: "https://pib.gov.in"
+    enabled: true
+    category: "government"
+    rate_limit: 20
+    priority: "high"
+
+  - name: "pib_ministry_of_defence"
+    type: "rss_html"
+    rss_url: "https://pib.gov.in/RssMain.aspx?ModId=6&Lang=1"
+    html_urls:
+      - "https://www.mod.gov.in/press-release"
+    selectors: ["h3 a", "h2 a", ".press-release a"]
+    base_url: "https://pib.gov.in"
+    enabled: true
+    category: "government"
+    rate_limit: 20
+    priority: "high"
+
+  - name: "drdo"
+    type: "html_only"
+    html_urls:
+      - "https://www.drdo.gov.in/whats-new"
+      - "https://www.drdo.gov.in/media-centre"
+    selectors: [".news-item a", ".whats-new a", "h3 a", "h2 a"]
+    base_url: "https://www.drdo.gov.in"
+    enabled: true
+    category: "government"
+    rate_limit: 15
+    priority: "high"
+
+  # MARKET-SPECIFIC (4) - Direct market moving news
+  - name: "moneycontrol_markets"
+    type: "rss_html"
+    rss_url: "https://www.moneycontrol.com/rss/marketnews.xml"
+    html_urls:
+      - "https://www.moneycontrol.com/news/business/markets/"
+      - "https://www.moneycontrol.com/news/business/stocks/"
+      - "https://www.moneycontrol.com/news/business/economy/"
+    selectors: ["h2 a", "h3 a", ".clearfix a", "a[href*='stock']", "a[href*='market']"]
+    base_url: "https://www.moneycontrol.com"
+    enabled: true
+    category: "market"
+    rate_limit: 15
+
+  - name: "moneycontrol_results"
+    type: "rss_html"
+    rss_url: "https://www.moneycontrol.com/rss/results.xml"
+    html_urls:
+      - "https://www.moneycontrol.com/news/buzzing-stocks/"
+    selectors: ["h2 a", "h3 a", ".clearfix a", "a[href*='result']", "a[href*='stock']"]
+    base_url: "https://www.moneycontrol.com"
+    enabled: true
+    category: "market"
+    rate_limit: 10
+    note: "Results season - catches small-cap earnings"
+
+  - name: "et_markets"
+    type: "rss_html"
+    rss_url: "https://economictimes.indiatimes.com/rss/marketnews.xml"
+    html_urls:
+      - "https://economictimes.indiatimes.com/markets/stocks"
+      - "https://economictimes.indiatimes.com/markets/ipos"
+    selectors: ["h3 a", "h2 a", ".story-title a"]
+    base_url: "https://economictimes.indiatimes.com"
+    enabled: true
+    category: "market"
+    rate_limit: 15
+
+  - name: "bs_markets"
+    type: "rss_html"
+    rss_url: "https://www.business-standard.com/rss/markets-106.rss"
+    html_urls:
+      - "https://www.business-standard.com/markets"
+    selectors: ["h2 a", "h3 a", "a[href*='stock']"]
+    base_url: "https://www.business-standard.com"
+    enabled: true
+    category: "market"
+    rate_limit: 10
+
+  - name: "mint_markets"
+    type: "rss_html"
+    rss_url: "https://www.livemint.com/rss/markets"
+    html_urls:
+      - "https://www.livemint.com/market"
+      - "https://www.livemint.com/market/stock-market-news"
+    selectors: ["h2 a", "h3 a", ".headline a"]
+    base_url: "https://www.livemint.com"
+    enabled: true
+    category: "market"
+    rate_limit: 15
+
+  - name: "tickertape_blog"
+    type: "rss_html"
+    rss_url: "https://www.tickertape.in/blog/feed"
+    html_urls:
+      - "https://www.tickertape.in/market-mood-index"
+      - "https://www.tickertape.in/stock-reports"
+    selectors: ["article a", ".post-title a", "h2 a", "h3 a"]
+    base_url: "https://www.tickertape.in"
+    enabled: true
+    category: "market"
+    rate_limit: 10
+    note: "Small-cap analysis and stock reports"
+
+  # NICHE SMALL-CAP SOURCES (6) - High signal for small/mid caps
+  - name: "equitymaster"
+    type: "rss_html"
+    rss_url: "https://equitymaster.com/rss.xml"
+    html_urls:
+      - "https://equitymaster.com/market/"
+      - "https://equitymaster.com/small-cap-stocks/"
+    selectors: ["h2 a", "h3 a", ".post-title a", "a[href*='small-cap']"]
+    base_url: "https://equitymaster.com"
+    enabled: true
+    category: "niche"
+    rate_limit: 10
+    note: "Value investing, small-cap research"
+
+  - name: "value_research"
+    type: "rss_html"
+    rss_url: "https://www.valueresearchonline.com/rss/"
+    html_urls:
+      - "https://www.valueresearchonline.com/stocks/"
+      - "https://www.valueresearchonline.com/funds/"
+    selectors: ["h2 a", "h3 a", ".article-title a", "a[href*='stock']"]
+    base_url: "https://www.valueresearchonline.com"
+    enabled: true
+    category: "niche"
+    rate_limit: 10
+    note: "Mutual fund/stock analysis, covers small-caps"
+
+  - name: "screener_in"
+    type: "html_only"
+    html_urls:
+      - "https://www.screener.in/screens/cheap-ideas/"
+      - "https://www.screener.in/screens/highest-sales-growth/"
+    selectors: ["a[href*='/company/']", ".company-name a", "h2 a"]
+    base_url: "https://www.screener.in"
+    enabled: true
+    category: "niche"
+    rate_limit: 10
+    note: "Stock screener - small-cap discovery"
+
+  - name: "trendlyne"
+    type: "rss_html"
+    rss_url: "https://trendlyne.com/feeds/"
+    html_urls:
+      - "https://trendlyne.com/markets/"
+      - "https://trendlyne.com/midcap/"
+    selectors: ["article a", ".post-title a", "h2 a", "h3 a"]
+    base_url: "https://trendlyne.com"
+    enabled: true
+    category: "niche"
+    rate_limit: 10
+    note: "Market analysis, mid/small-cap coverage"
+
+  - name: "valuepickr"
+    type: "rss_html"
+    rss_url: "https://www.valuepickr.com/forum/feed/"
+    html_urls:
+      - "https://www.valuepickr.com/forum/"
+    selectors: ["a.topic-title", ".topic-title a", "h3 a"]
+    base_url: "https://www.valuepickr.com"
+    enabled: true
+    category: "niche"
+    rate_limit: 10
+    note: "Community small-cap discussions"
+
+  - name: "bse_sme"
+    type: "html_only"
+    html_urls:
+      - "https://www.bseindia.com/markets/equity/EQReports/TopGainersLoosers.aspx"
+      - "https://www.bseindia.com/markets/Equity/SME.aspx"
+    selectors: ["h3 a", "h2 a", "table a", "a[href*='company']"]
+    base_url: "https://www.bseindia.com"
+    enabled: true
+    category: "niche"
+    rate_limit: 15
+    note: "BSE SME/small-cap gainers/losers"
+
+  # CORPORATE ACTIONS (2) - Direct from exchanges
+  - name: "nse_corporate_announcements"
+    type: "api"
+    api_url: "https://www.nseindia.com/api/corporate-announcements?index=equities"
+    enabled: true
+    category: "corporate"
+    rate_limit: 30
+    priority: "high"
+    note: "Requires nsepython or direct API with headers"
+
+  - name: "bse_corporate_filings"
+    type: "html_only"
+    html_urls:
+      - "https://www.bseindia.com/corporates/ann.html"
+      - "https://www.bseindia.com/corporates/corp_action.html"
+    selectors: ["#tblData a", "table a", ".tablebluelink"]
+    base_url: "https://www.bseindia.com"
+    enabled: true
+    category: "corporate"
+    rate_limit: 15
+    priority: "high"
+
+# Filtering keywords
+defence_keywords:
+  - "defence"
+  - "defense"
+  - "military"
+  - "army"
+  - "navy"
+  - "air force"
+  - "iaf"
+  - "hal"
+  - "bel"
+  - "bdl"
+  - "drdo"
+  - "brahmos"
+  - "tejas"
+  - "dhruv"
+  - "missile"
+  - "fighter jet"
+  - "submarine"
+  - "warship"
+  - "procurement"
+  - "contract"
+  - "order book"
+  - "indigenous"
+  - "atmanirbhar"
+  - "make in india defence"
+  - "ministry of defence"
+  - "mod"
+  - "dac"
+  - "defence acquisition"
+  - "defence export"
+
+market_keywords:
+  - "stock"
+  - "share"
+  - "market"
+  - "nse"
+  - "bse"
+  - "sensex"
+  - "nifty"
+  - "ipo"
+  - "qip"
+  - "buyback"
+  - "dividend"
+  - "earnings"
+  - "results"
+  - "profit"
+  - "revenue"
+  - "order"
+  - "contract"
+  - "deal"
+  - "acquisition"
+  - "merger"
+  - "expansion"
+  - "capex"
+  - "investment"
+  - "plI"
+  - "production linked incentive"
+  - "export"
+  - "partnership"
+  - "collaboration"
+  - "joint venture"
+
+exclude_keywords:
+  - "cinema"
+  - "movie"
+  - "actor"
+  - "actress"
+  - "film"
+  - "bollywood"
+  - "cricket"
+  - "football"
+  - "sports"
+  - "ipl"
+  - "match"
+  - "tournament"
+  - "teacher"
+  - "school"
+  - "college"
+  - "admit card"
+  - "exam"
+  - "uptet"
+  - "cheetah"
+  - "wildlife"
+  - "leopard"
+  - "tiger"
+  - "animal"
+  - "marriage"
+  - "wedding"
+  - "festival"
+  - "recipe"
+  - "cooking"
+  - "divya deshmukh"
+  - "chess"
+  - "carlsen"
+  - "entertainment"
+  - "celebrity"
+  - "gossip"
+
+# Scraping settings
+scraping:
+  timeout: 10
+  max_articles_per_source: 15
+  total_timeout: 60
+  parallel_workers: 8
+  enrich_workers: 5
+  enrich_timeout: 8
+  dedupe_threshold: 0.85
+  min_content_length: 100
+  max_content_length: 3000
+
+# Content enrichment selectors (fallback chain)
+enrichment_selectors:
+  - "article"
+  - ".article-body"
+  - ".story-content"
+  - ".content-body"
+  - ".article__content"
+  - ".Normal"
+  - ".articlebodycontent"
+  - "main"
+  - ".post-content"
+  - "#content"
+  - ".entry-content"
+  - ".news-content"
+  - ".detail-content"

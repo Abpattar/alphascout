@@ -1,0 +1,11 @@
+# AlphaScout
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+credentials.enc
+*.log
+data/*.json
+*.enc
+IDE/

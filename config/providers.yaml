@@ -1,0 +1,126 @@
+# AI Provider Routing Configuration
+# All free-tier models, auto-fallback on rate limits
+
+providers:
+  groq:
+    enabled: true
+    priority: 1
+    models:
+      - name: "llama-3.3-70b-versatile"
+        rpm: 30
+        tpm: 6000
+        best_for: ["triage", "impact_analysis", "trade_setup"]
+      - name: "llama-3.1-8b-instant"
+        rpm: 30
+        tpm: 6000
+        best_for: ["entity_extraction", "quick_filter"]
+    api_key_env: "GROQ_API_KEY"
+    base_url: "https://api.groq.com/openai/v1"
+
+  openrouter:
+    enabled: true
+    priority: 2
+    models:
+      - name: "nvidia/nemotron-3-ultra-550b-a55b:free"
+        rpm: 20
+        tpm: 5000
+        best_for: ["impact_analysis", "trade_setup", "triage"]
+      - name: "nvidia/nemotron-3-super-120b-a12b:free"
+        rpm: 30
+        tpm: 8000
+        best_for: ["entity_extraction", "quick_filter"]
+      - name: "qwen/qwen3-next-80b-a3b-instruct:free"
+        rpm: 50
+        tpm: 10000
+        best_for: ["triage", "impact_analysis"]
+    api_key_env: "OPENROUTER_API_KEY"
+    base_url: "https://openrouter.ai/api/v1"
+    headers:
+      HTTP-Referer: "https://github.com/alphascout"
+      X-Title: "AlphaScout"
+
+  cerebras:
+    enabled: true
+    priority: 3
+    models:
+      - name: "gpt-oss-120b"
+        rpm: 60
+        tpm: 12000
+        best_for: ["triage", "impact_analysis"]
+      - name: "gemma-4-31b"
+        rpm: 100
+        tpm: 20000
+        best_for: ["entity_extraction", "quick_filter"]
+    api_key_env: "CEREBRAS_API_KEY"
+    base_url: "https://api.cerebras.ai/v1"
+
+  gemini:
+    enabled: true
+    priority: 4
+    models:
+      - name: "gemini-3.1-flash-lite"
+        rpm: 60
+        tpm: 120000
+        best_for: ["entity_extraction", "quick_filter"]
+      - name: "gemini-2.0-flash"
+        rpm: 30
+        tpm: 60000
+        best_for: ["impact_analysis", "trade_setup"]
+    api_key_env: "GEMINI_API_KEY"
+    base_url: "https://generativelanguage.googleapis.com/v1beta"
+
+# Task routing: which provider/model to try first for each stage
+task_routing:
+  triage:
+    primary: "groq:llama-3.3-70b-versatile"
+    fallback:
+      - "cerebras:gpt-oss-120b"
+      - "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"
+      - "gemini:gemini-2.0-flash"
+    max_tokens: 500
+    temperature: 0.1
+
+  entity_extraction:
+    primary: "gemini:gemini-3.1-flash-lite"
+    fallback:
+      - "cerebras:gemma-4-31b"
+      - "openrouter:nvidia/nemotron-3-super-120b-a12b:free"
+      - "groq:llama-3.1-8b-instant"
+    max_tokens: 1000
+    temperature: 0.1
+
+  impact_analysis:
+    primary: "groq:llama-3.3-70b-versatile"
+    fallback:
+      - "cerebras:gpt-oss-120b"
+      - "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"
+      - "gemini:gemini-2.0-flash"
+    max_tokens: 2000
+    temperature: 0.15
+
+  trade_setup:
+    primary: "groq:llama-3.3-70b-versatile"
+    fallback:
+      - "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"
+      - "openrouter:qwen/qwen3-next-80b-a3b-instruct:free"
+      - "gemini:gemini-2.0-flash"
+    max_tokens: 2500
+    temperature: 0.2
+
+  quick_filter:
+    primary: "cerebras:gemma-4-31b"
+    fallback:
+      - "groq:llama-3.1-8b-instant"
+      - "gemini:gemini-3.1-flash-lite"
+      - "openrouter:nvidia/nemotron-3-super-120b-a12b:free"
+    max_tokens: 300
+    temperature: 0.05
+
+# Ensemble settings
+ensemble:
+  min_agreeing_models: 2
+  confidence_boost_per_agreement: 5
+  max_confidence: 95
+  require_direction_agreement: true
+  require_magnitude_agreement: false
+  magnitude_tolerance_pct: 3
