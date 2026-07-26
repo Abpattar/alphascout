@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-AlphaScout - Multi-Sector Small-Cap News → Trade Signal Bot
+AlphaScout - Multi-Sector Small-Cap News -> Trade Signal Bot
 Main Entry Point
 """
 import asyncio
 import logging
 import os
 import sys
+
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
 from datetime import datetime
 from pathlib import Path
 
@@ -260,7 +266,15 @@ async def main():
         stats = registry.get_all_stats()
         print("\n📊 Provider Stats:")
         for name, stat in stats.items():
-            print(f"   {name}: {stat['calls']} calls, {stat['errors']} errors, {stat['success_rate']}% success")
+            if "providers" in stat:
+                # Multi-key provider (Groq)
+                total_calls = sum(p.get("calls", 0) for p in stat["providers"])
+                total_errors = sum(p.get("errors", 0) for p in stat["providers"])
+                print(f"   {name}: {total_calls} calls, {total_errors} errors, {stat.get('keys', '?')} keys")
+            elif "calls" in stat:
+                print(f"   {name}: {stat['calls']} calls, {stat['errors']} errors, {stat['success_rate']}% success")
+            else:
+                print(f"   {name}: {stat}")
 
 
 if __name__ == "__main__":

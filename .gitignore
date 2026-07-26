@@ -7,5 +7,9 @@ __pycache__/
 credentials.enc
 *.log
 data/*.json
+data/*.pkl
+data/*.jsonl
 *.enc
 IDE/
+Api.txt
+*.docx
