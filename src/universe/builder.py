@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 UNIVERSE_CACHE = DATA_DIR / "universe_cache.json"
 UNIVERSE_TTL_DAYS = 7
+UNIVERSE_CHANGE_LOG = DATA_DIR / "universe_changes.jsonl"
 
 
 @dataclass
@@ -300,28 +301,67 @@ class UniverseBuilder:
         return yf_map.get(yf_sector.lower(), "other")
 
     def _apply_filters(self, stocks: Dict[str, Stock]) -> Dict[str, Stock]:
-        """Apply final filters from config"""
+        """Apply rule-based filters from config/settings.yaml"""
         from src.config import get_universe_config
 
         config = get_universe_config()
         filtered = {}
+        rejected = []
+
+        price_min = config.get("price_min", 50)
+        price_max = config.get("price_max", 500)
+        cap_min = config.get("market_cap_min_cr", 100)
+        cap_max = config.get("market_cap_max_cr", 5000)
+        vol_min = config.get("min_avg_daily_volume_lakh", 50)
+        value_min_cr = config.get("min_avg_daily_value_cr", 1.0)
 
         for ticker, stock in stocks.items():
             # Price filter
-            if not (config.get("price_min", 50) <= stock.price <= config.get("price_max", 500)):
+            if not (price_min <= stock.price <= price_max):
+                rejected.append((ticker, stock.name, f"price ₹{stock.price:.2f} not in ₹{price_min}-{price_max}"))
                 continue
 
             # Market cap filter
-            if not (config.get("market_cap_min_cr", 100) <= stock.market_cap_cr <= config.get("market_cap_max_cr", 5000)):
+            if not (cap_min <= stock.market_cap_cr <= cap_max):
+                rejected.append((ticker, stock.name, f"cap ₹{stock.market_cap_cr:.0f}Cr not in {cap_min}-{cap_max}Cr"))
                 continue
 
-            # Volume filter
-            if stock.avg_volume_lakh < config.get("min_avg_daily_volume_lakh", 50):
+            # Volume filter (in lakh)
+            if stock.avg_volume_lakh < vol_min:
+                rejected.append((ticker, stock.name, f"volume {stock.avg_volume_lakh:.1f}L < {vol_min}L"))
+                continue
+
+            # Daily traded value filter (price * volume in Cr)
+            daily_value_cr = stock.price * stock.avg_volume_lakh * 1e5 / 1e7  # price * vol_lakh * 1e5 / 1e7
+            if daily_value_cr < value_min_cr:
+                rejected.append((ticker, stock.name, f"daily value ₹{daily_value_cr:.2f}Cr < ₹{value_min_cr}Cr"))
                 continue
 
             filtered[ticker] = stock
 
+        # Log changes if enabled
+        if config.get("log_changes", True) and rejected:
+            self._log_changes(new_stocks=set(filtered.keys()), rejected=rejected)
+
+        if rejected:
+            logger.info(f"Universe filters: {len(filtered)} passed, {len(rejected)} rejected")
+
         return filtered
+
+    def _log_changes(self, new_stocks: set, rejected: list):
+        """Log universe changes for bias detection."""
+        try:
+            UNIVERSE_CHANGE_LOG.parent.mkdir(exist_ok=True)
+            entry = {
+                "timestamp": datetime.now().isoformat(),
+                "passed_count": len(new_stocks),
+                "rejected_count": len(rejected),
+                "rejected_samples": [{"ticker": t, "name": n, "reason": r} for t, n, r in rejected[:10]],
+            }
+            with open(UNIVERSE_CHANGE_LOG, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception as e:
+            logger.debug(f"Failed to log universe changes: {e}")
 
     def _enrich_keywords(self, stocks: Dict[str, Stock]):
         """Add search keywords for each stock"""

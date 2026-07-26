@@ -109,6 +109,12 @@ Build "AlphaScout" — a multi-sector small-cap news→trade signal bot that:
 7. ✅ **Min daily traded value** — Configurable threshold (default ₹1 Cr/day)
 8. ✅ **Weekly drawdown reset** — Automatically resets on new calendar week
 
+### Session 7 Changes — Phase 6: Universe Construction Rules
+1. ✅ **Rule-based filters from config** — All thresholds (price, cap, volume, daily value) in `config/settings.yaml`
+2. ✅ **Added daily traded value filter** — Rejects stocks with < ₹1 Cr/day traded value (liquidity check)
+3. ✅ **Universe change logging** — Logs rejected stocks with reasons to `data/universe_changes.jsonl` for bias detection
+4. ✅ **Configurable logging** — `log_changes: true/false` in settings.yaml
+
 ### Production Test Results
 ```
 #1 RRP Defense [RRPDEFENSE.BO] — STRONG_BUY (LONG)
@@ -328,6 +334,10 @@ python -c "from src.universe.builder import get_universe; u = get_universe(); pr
 ### Session 7 — Phase 5 (Portfolio Risk)
 - `config/settings.yaml` — Added `portfolio` section (personal_use_only, paper_trading, sizing limits, drawdown)
 - `src/portfolio/manager.py` — **Rewritten** — Fixed mapper bug, added all safety constraints
+
+### Session 7 — Phase 6 (Universe Rules)
+- `config/settings.yaml` — Added `min_avg_daily_value_cr`, `log_changes`, `exclude_sebi_asm/gsm`
+- `src/universe/builder.py` — Rule-based filters from config, universe change logging
 
 ---
 
