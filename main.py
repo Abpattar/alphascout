@@ -241,8 +241,9 @@ async def main():
 
     elif args.command == "backtest":
         sys.path.insert(0, str(Path(__file__).parent / "scripts"))
-        from backtest import main as backtest_main
-        backtest_main()
+        from scripts.backtest import resolve_outcomes, show_results
+        resolve_outcomes(days=30)
+        show_results()
 
     elif args.command == "portfolio":
         from src.portfolio.manager import PortfolioManager

@@ -76,6 +76,13 @@ Build "AlphaScout" — a multi-sector small-cap news→trade signal bot that:
 6. ✅ **Thread-safe** — Uses WAL mode and threading.local() for concurrent access
 7. ✅ **Zero-config** — SQLite file auto-created at `data/alphascout.db`, no server needed
 
+### Session 7 Changes — Phase 2: Backtesting Harness
+1. ✅ **Rewrote `scripts/backtest.py`** — Full backtest harness with 3 actions: `resolve`, `replay`, `results`
+2. ✅ **`resolve` action** — Fetches actual price outcomes from yfinance for unresolved signals, stores in `outcomes` table
+3. ✅ **`replay` action** — Replays stored articles through pipeline to generate new signals
+4. ✅ **`results` action** — Computes win rate, avg R-multiple, profit factor, max drawdown, expectancy, and confidence calibration buckets
+5. ✅ **Updated `main.py` backtest command** — Now runs resolve + show results automatically
+
 ### Production Test Results
 ```
 #1 RRP Defense [RRPDEFENSE.BO] — STRONG_BUY (LONG)
@@ -196,11 +203,20 @@ python main.py scan --signals 3
 # Check database stats
 python main.py db
 
+# Backtest: fetch outcomes + show results
+python main.py backtest
+
+# Backtest: resolve outcomes only
+python scripts/backtest.py resolve --days 30
+
+# Backtest: replay pipeline on stored articles
+python scripts/backtest.py replay --days 30 --max-signals 10
+
+# Backtest: show results only
+python scripts/backtest.py results
+
 # Check universe
 python -c "from src.universe.builder import get_universe; u = get_universe(); print(f'{len(u)} stocks')"
-
-# Test providers
-python -c "from src.ai.providers import ProviderRegistry; reg = ProviderRegistry(); print(list(reg.providers.keys()))"
 ```
 
 ---
@@ -264,6 +280,10 @@ python -c "from src.ai.providers import ProviderRegistry; reg = ProviderRegistry
 - `src/scraping/scraper.py` — Wired articles to DB storage
 - `src/analysis/pipeline.py` — Wired LLM analyses and signals to DB
 - `main.py` — Added `db` command for database stats
+
+### Session 7 — Phase 2 (Backtesting)
+- `scripts/backtest.py` — **Rewritten** — Full backtest harness (resolve/replay/results)
+- `main.py` — Updated backtest command to use new module
 
 ---
 
