@@ -45,6 +45,21 @@ risk:
   stop_loss_buffer_pct: 0.5
   trailing_stop_activation_pct: 5.0
   trailing_stop_distance_pct: 2.0
+  max_weekly_drawdown_pct: 8.0
+  max_single_loss_pct: 5.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PORTFOLIO CONSTRAINTS
+# ─────────────────────────────────────────────────────────────────────────────
+portfolio:
+  personal_use_only: true
+  paper_trading: true
+  max_positions: 5
+  max_per_sector: 2
+  max_position_size_pct: 10.0
+  min_position_size_pct: 1.0
+  max_portfolio_allocation_pct: 50.0
+  min_avg_daily_value_cr: 1.0
 
 # ─────────────────────────────────────────────────────────────────────────────
 # AI ENSEMBLE

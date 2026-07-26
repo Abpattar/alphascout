@@ -99,6 +99,16 @@ Build "AlphaScout" — a multi-sector small-cap news→trade signal bot that:
 5. ✅ **Source tier wired into scraper** — Articles carry their source tier for downstream use
 6. ✅ **Impact analysis prompt updated** — Considers source tier in confidence assessment
 
+### Session 7 Changes — Phase 5: Portfolio Risk Rules
+1. ✅ **Fixed `self.mapper` bug** — `_get_sector()` now uses `get_universe()` instead of non-existent `self.mapper`
+2. ✅ **Added `PERSONAL_USE_ONLY` flag** — SEBI compliance, loaded from `config/settings.yaml`
+3. ✅ **Added `paper_trading` mode** — All trades logged but not executed, mode shown in logs
+4. ✅ **Max drawdown kill-switch** — Tracks weekly PnL, pauses auto-execution if weekly loss >= 8%
+5. ✅ **Hard position sizing limits** — Max 10% per position, min 1%, max 50% portfolio allocation
+6. ✅ **Max single loss check** — Rejects signals with stop loss > 5%
+7. ✅ **Min daily traded value** — Configurable threshold (default ₹1 Cr/day)
+8. ✅ **Weekly drawdown reset** — Automatically resets on new calendar week
+
 ### Production Test Results
 ```
 #1 RRP Defense [RRPDEFENSE.BO] — STRONG_BUY (LONG)
@@ -314,6 +324,10 @@ python -c "from src.universe.builder import get_universe; u = get_universe(); pr
 - `src/ai/prompts.py` — Added PR/pump detection to triage prompt
 - `src/analysis/pipeline.py` — Added pr_pump_risk filtering (HIGH=reject, MEDIUM=penalty)
 - `src/scraping/scraper.py` — Source tier now carried in article data
+
+### Session 7 — Phase 5 (Portfolio Risk)
+- `config/settings.yaml` — Added `portfolio` section (personal_use_only, paper_trading, sizing limits, drawdown)
+- `src/portfolio/manager.py` — **Rewritten** — Fixed mapper bug, added all safety constraints
 
 ---
 
