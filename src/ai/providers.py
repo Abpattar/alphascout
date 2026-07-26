@@ -159,7 +159,7 @@ class GroqProvider(BaseProvider):
         super().__init__(api_key, f"groq:{model}")
         try:
             from groq import Groq
-            self.client = Groq(api_key=api_key)
+            self.client = Groq(api_key=api_key, max_retries=0, timeout=15)
             self.model = model
         except Exception as e:
             raise ProviderError(f"Failed to init Groq: {e}")

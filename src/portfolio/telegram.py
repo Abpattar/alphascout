@@ -6,9 +6,14 @@ import os
 import json
 import logging
 import asyncio
+import ssl
 from typing import Optional, Dict
 
 import aiohttp
+
+SSL_CTX = ssl.create_default_context()
+SSL_CTX.check_hostname = False
+SSL_CTX.verify_mode = ssl.CERT_NONE
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +36,8 @@ async def send_message(text: str, parse_mode: str = "HTML") -> bool:
             async with session.post(
                 f"{BASE_URL}/sendMessage",
                 json={"chat_id": CHAT_ID, "text": text, "parse_mode": parse_mode},
-                timeout=aiohttp.ClientTimeout(total=15)
+                timeout=aiohttp.ClientTimeout(total=15),
+                ssl=SSL_CTX
             ) as resp:
                 if resp.status == 200:
                     logger.info("Telegram message sent successfully")
