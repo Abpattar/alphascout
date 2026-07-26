@@ -1,218 +1,180 @@
 ========================================================================
-ALPHASCOUT v1.0 — PROBLEMS, SOLUTIONS & IMPROVEMENTS
-Multi-Sector Small-Cap News to Trade Signal Bot (Indian Markets)
+ALPHASCOUT — SIMPLIFIED PROBLEMS & PREFERRED SOLUTIONS
 ========================================================================
-
-This document maps each identified risk in the current design to a
-concrete solution, and shows where it fits into the existing codebase
-structure. Priority order is listed at the bottom — build in that
-order, not randomly.
+Plain-language summary of every issue found so far, and the fix
+preferred for each. Ordered by priority — fix top to bottom.
 
 ------------------------------------------------------------------------
-PROBLEM 1: NEWS-REACTION LAG
+PROBLEM 1: Your stock list and your filter reject each other
 ------------------------------------------------------------------------
-Issue:
-  By the time articles are scraped, parsed, and analyzed, small-cap
-  price moves are often already priced in. A 2x/day scheduler
-  (6:30 AM / 4:30 PM) reacts too slowly to be a true edge source.
+Simple version:
+  You picked ~150 famous sector stocks (HAL, BEL, IRCTC, SUZLON etc.)
+  by hand. But your filter only allows small stocks (price 50-500).
+  Most famous names have grown too big, so only 14 stocks survive.
+  You built a list that was never going to pass your own filter.
 
-Solution / Improvement:
-  - Shift primary trigger from "news appears" to "price/volume
-    anomaly + news confirms it."
-  - Add an anomaly detector (unusual volume vs 20-day average,
-    breakout above resistance) that runs more frequently
-    (every 15-30 min) using yfinance data.
-  - Keep screener-first mode (NSE gainers -> Screener.in ->
-    Trendlyne -> news match) as the PRIMARY path, not a secondary
-    mode. News/LLM analysis becomes a confirmation filter, not
-    the trigger itself.
-  - Code location: src/screening/screener.py becomes the primary
-    entry point; src/scraping/scraper.py output feeds into it as
-    supporting evidence, not the reverse.
+Preferred solution:
+  Stop hand-picking stocks by sector first. Instead:
+    1. Pull the FULL list of small-cap stocks from Screener.in using
+       just the price/size/volume filters (no sector bias).
+    2. AFTER that list exists, tag each stock with a sector label
+       (defence, EV, rail, etc.) if it matches your keywords.
+  Sector becomes a label added after, not a gate applied before.
 
 ------------------------------------------------------------------------
-PROBLEM 2: LLM "CONFIDENCE" IS NOT A CALIBRATED PROBABILITY
+PROBLEM 2: The bot can only confirm stocks it already knows, never
+discover new ones from news
 ------------------------------------------------------------------------
-Issue:
-  Auto-executing trades at "90%+ confidence" assumes the LLM's
-  self-reported confidence matches real-world win rate. This is
-  unverified and likely wrong. This is the single riskiest part
-  of the current design.
+Simple version:
+  Right now, an article is only read further if it mentions a stock
+  ALREADY in your 14-stock list. So if good news breaks about a small
+  stock not yet tracked, it gets thrown away before the AI even sees
+  it. This means your "AI finds opportunities from news" idea doesn't
+  actually work yet — it can only re-confirm stocks you already added.
 
-Solution / Improvement:
-  - Never auto-execute directly off raw LLM confidence.
-  - Log every signal (executed or not) for 2-3+ months first.
-  - Build a calibration step: bucket signals by stated confidence,
-    compare to actual outcome (win/loss, R-multiple) after 3-7 days.
-  - Remap raw LLM confidence to a "calibrated confidence" using
-    your own historical data before it's allowed to trigger
-    src/portfolio/manager.py auto-execution.
-  - New module suggestion: src/analysis/calibration.py
-
-------------------------------------------------------------------------
-PROBLEM 3: NO BACKTESTING / VALIDATION LOOP
-------------------------------------------------------------------------
-Issue:
-  There is no proof the pipeline's signals have real edge. Without
-  this, deploying capital is gambling on an untested hypothesis.
-
-Solution / Improvement:
-  - Pull 1-2 years of historical news + historical price data for
-    the 75-stock universe.
-  - Replay historical articles through the exact current pipeline,
-    generate signals, compare against actual subsequent price action.
-  - Compute: win rate, average R-multiple, max drawdown, and a
-    Sharpe-like ratio for the signal set.
-  - Run forward paper-trading in parallel for 4-8 weeks (catches
-    pipeline bugs backtests can't, e.g. scraping failures, ticker
-    mismatches).
-  - Code location: scripts/backtest.py already exists as a stub —
-    this needs to become the most developed part of the codebase,
-    not an afterthought.
+Preferred solution:
+  Let the ticker-matching step check article text against the FULL
+  NSE stock list (or a name/alias list), not just your small 14-stock
+  universe. Only AFTER a stock is found in an article should you check
+  if it passes your safety filters (price, market cap, liquidity).
+  Filtering should happen after discovery, not before.
 
 ------------------------------------------------------------------------
-PROBLEM 4: CORPORATE PR / PUMP-AND-DUMP RISK
+PROBLEM 3: New stocks found on-the-fly might skip your safety checks
 ------------------------------------------------------------------------
-Issue:
-  Corporate press releases and PR-driven small-cap coverage are
-  classic pump material in Indian markets. An LLM reading a
-  company's own glowing press release could generate a "buy"
-  signal that's actually inherited pump risk.
+Simple version:
+  When the bot finds a brand-new ticker mid-analysis, it validates it
+  using a quick yfinance lookup. But it's unclear if this quick check
+  applies the SAME safety rules (minimum liquidity, no SEBI
+  surveillance stocks, minimum listing age) as your main weekly
+  universe build. If not, risky/illiquid stocks could sneak in through
+  this shortcut.
 
-Solution / Improvement:
-  - Tier sources by trust level in config/sources.yaml:
-      Tier 1 (highest): government/regulatory filings (SEBI, NSE/BSE
-        announcements)
-      Tier 2: mainstream financial press
-      Tier 3 (caution): niche small-cap/market-specific sites
-      Tier 4 (lowest, informational only): corporate press releases
-        — never a standalone buy trigger
-  - Prompt the LLM ensemble (src/ai/prompts.py) to explicitly flag:
-      promotional language, unusual PR timing right after a price
-      run-up, lack of independent corroboration.
-  - Require independent confirmation from 2+ non-corporate sources
-    before treating news as bullish.
-  - Cross-check against SEBI's published ASM/GSM surveillance stage
-    lists — exclude or heavily downweight flagged stocks.
+Preferred solution:
+  Make on-the-fly ticker validation call the exact same filter
+  function used in the weekly universe build. One filter function,
+  used everywhere — no separate "lighter" version for new discoveries.
 
 ------------------------------------------------------------------------
-PROBLEM 5: UNIVERSE SELECTION BIAS
+PROBLEM 4: News-reaction is naturally slow
 ------------------------------------------------------------------------
-Issue:
-  If the 75-stock universe was hand-picked (even informally) based
-  on stocks that moved well historically, this bakes survivorship/
-  selection bias into the entire system before it even runs.
+Simple version:
+  By the time news is scraped and read, the stock has often already
+  moved. Running only twice a day (6:30 AM, 4:30 PM) makes this worse.
 
-Solution / Improvement:
-  - Define objective, rule-based inclusion criteria: market cap band,
-    minimum daily traded value/liquidity, minimum listing age,
-    not currently under SEBI ASM/GSM surveillance.
-  - Rebuild the universe on a fixed schedule (e.g. monthly) using
-    these rules only — no manual curation.
-  - Log every universe change so bias can be checked retroactively.
-  - Code location: src/universe/builder.py should implement rules
-    as config-driven filters (config/settings.yaml thresholds),
-    not hardcoded lists.
+Preferred solution:
+  Treat price/volume spikes as the main trigger (checked more often,
+  every 15-30 min), and use news only to CONFIRM whether the move has
+  a real reason behind it. Screener-first mode should be the main
+  path; news scraping becomes the supporting evidence, not the
+  starting point.
 
 ------------------------------------------------------------------------
-PROBLEM 6: LIQUIDITY / EXIT RISK
+PROBLEM 5: LLM "confidence" score isn't proven accurate
 ------------------------------------------------------------------------
-Issue:
-  3-7 day holding periods with 10%+ targets sound good until a stock
-  hits a lower circuit and becomes impossible to exit. No position
-  sizing or portfolio-level risk limits exist currently.
+Simple version:
+  When the AI says "90% confident," that doesn't mean it's actually
+  right 90% of the time. Auto-trading based on this number is risky
+  until you've checked whether it's true.
 
-Solution / Improvement:
-  - Filter universe for minimum average daily traded value (e.g.
-    exclude anything trading less than ~1-2 crore INR/day).
-  - Hard position sizing rules: max % of portfolio per trade
-    (e.g. 2-5%), max concurrent positions, max sector concentration.
-  - Check recent circuit-limit history before entry — treat recent
-    circuit hits as a liquidity red flag, not a momentum signal.
-  - Add a portfolio-level max-drawdown kill-switch that pauses
-    auto-execution if losses hit a threshold in a week/month.
-  - Code location: src/portfolio/manager.py needs these rules built
-    in as hard constraints, not optional settings.
+Preferred solution:
+  Log every signal for months without auto-trading. Compare stated
+  confidence vs what actually happened. Use your own real win-rate
+  data to correct the AI's confidence score before ever auto-executing
+  trades. Require a much larger sample (30-50+ signals) per confidence
+  bucket before trusting it — 5 signals is not enough to be sure.
 
 ------------------------------------------------------------------------
-PROBLEM 7: REGULATORY EXPOSURE (SEBI)
+PROBLEM 6: No proof yet that the strategy works
 ------------------------------------------------------------------------
-Issue:
-  Generating and distributing buy/sell signals in India without
-  SEBI Research Analyst / Investment Adviser registration is a
-  securities-law issue, not just a ToS issue — the moment this
-  goes beyond personal use.
+Simple version:
+  The backtesting tool now exists, but has it actually been run on
+  real past data yet? Building the tool isn't the same as knowing the
+  results.
 
-Solution / Improvement:
-  - Keep a hard config flag: PERSONAL_USE_ONLY = true
-  - Do not add multi-user Telegram distribution, subscriptions, or
-    sharing features until SEBI RA/IA regulations have been
-    reviewed properly (not as an afterthought).
-  - Auto-execution via Zerodha Kite for your OWN account only is
-    much lower risk than distributing signals to others.
-  - This is a decision to make explicitly and in writing, not
-    something to grow into gradually.
+Preferred solution:
+  Actually run the backtest on 1-2 years of real historical news +
+  prices. Look at the real win rate, profit factor, and max drawdown
+  before trusting the system with money — even paper money.
 
 ------------------------------------------------------------------------
-PROBLEM 8: NO PERSISTENT DATA STORAGE (DATABASE)
+PROBLEM 7: Company press releases can be disguised pump news
 ------------------------------------------------------------------------
-Issue:
-  Without storing raw articles, LLM outputs, and outcomes, none of
-  the above fixes (calibration, backtesting, debugging) are possible.
-  News sources also change/delete articles over time.
+Simple version:
+  A company's own press release praising itself isn't independent
+  news — it could be designed to pump the stock before insiders sell.
 
-Solution / Improvement:
-  Add a database — SQLite is sufficient to start (single file, zero
-  server setup, easy to query with pandas). Move to Postgres later
-  if needed.
+Preferred solution (already partly built):
+  Keep source tiering (govt > mainstream news > niche sites >
+  company PR). Keep the PR/pump detection prompt. Make sure PR-only
+  news, with no independent confirmation, never triggers a signal by
+  itself.
 
-  Minimum tables:
-    1. raw_articles: source, URL, scraped_at, published_at,
-       raw_text/HTML, extracted_tickers
-    2. llm_analysis: article_id (FK), provider(s) used, raw
-       reasoning/output, confidence_score, signal (buy/sell/none),
-       entry/target/stop
-    3. signals: final signal after logic layer, timestamp, ticker,
-       confidence, targets, executed (bool)
-    4. outcomes: signal_id (FK), price at signal time, price at
-       +1/+3/+7 days, target/stop hit, actual R-multiple
+------------------------------------------------------------------------
+PROBLEM 8: Small stocks can be hard to exit
+------------------------------------------------------------------------
+Simple version:
+  A small stock can hit a "lower circuit" (price freeze) and become
+  impossible to sell, turning a small loss into a stuck position.
 
-  Important: store RAW article text even if redundant — prompts and
-  extraction logic will evolve, and old articles need to be
-  re-runnable through new pipeline versions.
+Preferred solution (already partly built):
+  Keep minimum daily traded value filters, position size limits, and
+  the weekly drawdown kill-switch. Also check a stock's recent circuit
+  history before entering — recent circuit hits should count against
+  a stock, not in its favor.
 
-  Code location: new module — src/storage/db.py — used by
-  src/scraping/scraper.py (writes), src/ai/ensemble.py (writes),
-  and scripts/backtest.py (reads).
+------------------------------------------------------------------------
+PROBLEM 9: This project could cross into regulated territory
+------------------------------------------------------------------------
+Simple version:
+  In India, generating and sharing buy/sell signals with others
+  (even friends) may require SEBI registration as a Research Analyst
+  or Investment Adviser. This is a real legal rule, not just a
+  guideline.
+
+Preferred solution:
+  Keep this strictly personal-use only for now (your own Telegram,
+  your own trading account). Don't share signals with others or
+  monetize until SEBI's rules have actually been read and understood.
+
+------------------------------------------------------------------------
+PROBLEM 10: LLM usage might run out of free budget mid-run
+------------------------------------------------------------------------
+Simple version:
+  Each article goes through 5 separate AI calls. Running this twice a
+  day across many articles could use up your free daily AI quota
+  before the run even finishes, causing silent quality drops.
+
+Preferred solution:
+  Track how many tokens/calls are actually used per full run. Confirm
+  it comfortably fits inside the free tier limits, or add caps so the
+  system stops gracefully instead of silently degrading mid-run.
+
+------------------------------------------------------------------------
+PROBLEM 11: Confidence calibration needs live data, not memory
+------------------------------------------------------------------------
+Simple version:
+  The calibration system compares stated confidence to real results —
+  but only works if someone checks stock prices a few days after
+  every signal and records what happened. If this step isn't
+  automatic, the calibration data goes stale and becomes useless.
+
+Preferred solution:
+  Set up a scheduled job that automatically checks each open signal's
+  result a few days later and records it — don't rely on manually
+  remembering to do this.
 
 ========================================================================
-SUGGESTED BUILD ORDER (highest risk-reduction first)
+FIX ORDER (do these first, in this order)
 ========================================================================
-  1. Database / logging infrastructure (src/storage/db.py)
-     — store every article, LLM output, and signal, no execution yet
-  2. Historical backtest harness (scripts/backtest.py)
-  3. Forward paper-trading for several weeks (log only, no execution)
-  4. Confidence calibration analysis (src/analysis/calibration.py)
-  5. Source trust-tiering + PR/pump filters (config/sources.yaml,
-     src/ai/prompts.py)
-  6. Position sizing & portfolio risk rules (src/portfolio/manager.py)
-  7. Universe construction rules (src/universe/builder.py)
-  8. ONLY THEN: auto-execution, starting with tiny position sizes
-     and PERSONAL_USE_ONLY = true
-
-========================================================================
-WHAT'S ALREADY GOOD (keep these)
-========================================================================
-  - 6-provider LLM ensemble as a reliability/rate-limit fallback
-    strategy (not a signal-quality feature, but genuinely useful
-    infra design)
-  - 2:1 minimum risk-reward with defined stop-losses
-  - Screener-first mode concept (gainers -> fundamentals -> news)
-    is more defensible than pure news-reaction — promote this to
-    the primary path per Problem 1 above
-  - Config-driven architecture (yaml-based sources/sectors/settings)
-    makes most of these fixes additive rather than requiring a
-    rewrite
+  1. Fix universe construction (Problem 1) — filter first, tag sector
+     after
+  2. Fix ticker discovery flow (Problem 2) — check full stock list,
+     not just your small universe
+  3. Fix on-the-fly validation (Problem 3) — same filter function
+     everywhere
+  4. Actually run the backtest and read the results (Problem 6)
+  5. Everything else, in the order listed above
 
 ========================================================================
 END OF DOCUMENT

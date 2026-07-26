@@ -1,6 +1,7 @@
 """
 Small-Cap Screener Module
-Finds active small-caps with unusual activity from Screener.in, Trendlyne, and NSE
+Finds active small-caps with unusual activity from Screener.in, Trendlyne, and NSE.
+Problem 4: Price/volume spikes as main trigger, news as confirmation.
 """
 import logging
 import re
@@ -10,6 +11,7 @@ from typing import List, Dict, Optional, Set
 from datetime import datetime
 
 import requests
+import yfinance as yf
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
@@ -287,3 +289,101 @@ if __name__ == "__main__":
     print(f"\nFound {len(candidates)} candidates:")
     for c in candidates:
         print(f"  {c.ticker:15s} | ₹{c.price:8.2f} | {c.change_pct:+6.1f}% | {c.source:15s} | {c.reason}")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Problem 4: Price/Volume Spike Detection (main trigger, news as confirmation)
+# ─────────────────────────────────────────────────────────────────────────
+
+def scan_price_volume_spikes(
+    universe_tickers: List[str],
+    volume_spike_threshold: float = 2.0,
+    price_spike_threshold: float = 3.0,
+    max_results: int = 20,
+) -> List[ScreenerCandidate]:
+    """
+    Scan universe stocks for unusual price/volume spikes.
+    This should run more frequently (every 15-30 min) as the PRIMARY trigger.
+    News scraping becomes secondary confirmation, not the starting point.
+    
+    Args:
+        universe_tickers: List of tickers to scan (from universe)
+        volume_spike_threshold: How many times average volume = spike (e.g., 2x = spike)
+        price_spike_threshold: Min % change to consider a spike
+        max_results: Max candidates to return
+    """
+    candidates = []
+
+    if not universe_tickers:
+        logger.warning("No universe tickers to scan for spikes")
+        return []
+
+    # Batch fetch recent data
+    chunk_size = 50
+    for i in range(0, len(universe_tickers), chunk_size):
+        chunk = universe_tickers[i:i + chunk_size]
+        tickers_str = " ".join(chunk)
+
+        try:
+            data = yf.Tickers(tickers_str)
+        except Exception as e:
+            logger.warning(f"Batch fetch failed for spike scan: {e}")
+            continue
+
+        for ticker in chunk:
+            try:
+                t = data.tickers.get(ticker)
+                if not t:
+                    continue
+
+                hist = t.history(period="1mo")
+                if hist.empty or len(hist) < 5:
+                    continue
+
+                # Current price and today's change
+                current_price = float(hist["Close"].iloc[-1])
+                prev_close = float(hist["Close"].iloc[-2]) if len(hist) > 1 else current_price
+                day_change_pct = ((current_price - prev_close) / prev_close * 100) if prev_close else 0
+
+                # Volume spike: today's volume vs 20-day average
+                today_volume = float(hist["Volume"].iloc[-1])
+                avg_volume_20d = float(hist["Volume"].iloc[-20:].mean()) if len(hist) >= 20 else float(hist["Volume"].mean())
+                volume_ratio = today_volume / avg_volume_20d if avg_volume_20d > 0 else 1.0
+
+                # Detect spike
+                is_price_spike = abs(day_change_pct) >= price_spike_threshold
+                is_volume_spike = volume_ratio >= volume_spike_threshold
+
+                if is_price_spike or is_volume_spike:
+                    reasons = []
+                    if is_price_spike:
+                        reasons.append(f"Price {'+'if day_change_pct > 0 else ''}{day_change_pct:.1f}%")
+                    if is_volume_spike:
+                        reasons.append(f"Volume {volume_ratio:.1f}x avg")
+
+                    info = t.info or {}
+                    market_cap = info.get("marketCap", 0)
+                    market_cap_cr = round(market_cap / 1e7, 1) if market_cap else 0
+
+                    candidates.append(ScreenerCandidate(
+                        ticker=ticker,
+                        name=info.get("longName", ticker),
+                        price=current_price,
+                        change_pct=round(day_change_pct, 2),
+                        volume_lakh=round(today_volume * current_price / 1e5, 1),
+                        market_cap_cr=market_cap_cr,
+                        source="spike_scan",
+                        reason=" | ".join(reasons),
+                        fetched_at=datetime.now().isoformat(),
+                    ))
+
+            except Exception as e:
+                logger.debug(f"Spike scan failed for {ticker}: {e}")
+
+        time.sleep(0.3)
+
+    # Sort by spike magnitude
+    candidates.sort(key=lambda c: abs(c.change_pct), reverse=True)
+
+    logger.info(f"Spike scan: {len(candidates)} stocks with unusual activity")
+    return candidates[:max_results]

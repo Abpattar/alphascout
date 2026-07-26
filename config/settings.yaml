@@ -8,6 +8,8 @@ schedule:
   runs_per_day: 2
   run_times: ["06:30", "16:30"]  # IST
   timezone: "Asia/Kolkata"
+  spike_scan_interval_minutes: 15   # Issue 2: lightweight spike scan during market hours
+  spike_scan_market_hours_only: true  # only scan 9:15 AM – 3:30 PM IST
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UNIVERSE FILTERS
@@ -96,6 +98,17 @@ ensemble:
       stages: ["entity_extraction"]
   agreement_threshold: 2  # Minimum models agreeing
   magnitude_tolerance_pct: 3
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LLM BUDGET CEILING (Issue 4)
+# Hard caps: pipeline degrades gracefully when all providers are exhausted.
+# Tokens are estimated (calls × 700 avg). Calls are absolute.
+# ─────────────────────────────────────────────────────────────────────────────
+llm_budget:
+  daily_token_budget: 120000   # ~100K Groq free-tier + buffer for other providers
+  daily_call_budget: 300       # absolute max LLM calls per day
+  per_run_token_budget: 40000  # max tokens per single pipeline run
+  per_run_call_budget: 80      # max LLM calls per single pipeline run
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PROMPT TOKEN LIMITS

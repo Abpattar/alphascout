@@ -17,6 +17,13 @@ IMPORTANT: Flag potential pump-and-dump or corporate PR risks. Watch for:
 - Lack of specific financial details (no ₹ values, no timelines)
 - Generic "expansion plans" or "strategic vision" without concrete orders
 
+CRITICAL PR/PUMP RULE (Problem 7):
+- If the ONLY source is the company's own press release/website, flag pr_pump_risk as HIGH
+- If no independent news outlet has confirmed the news, flag pr_pump_risk as HIGH
+- A signal should NEVER be generated from company PR alone — require at least one independent source
+- "Strategic partnership" or "MoU signed" without specific ₹ values = HIGH PR risk
+- Vague "expansion plans" without concrete order numbers = HIGH PR risk
+
 RETURN ONLY VALID JSON. No markdown, no explanation."""
 
 TRIAGE_PROMPT = """Analyze this news article for tradeable catalysts:

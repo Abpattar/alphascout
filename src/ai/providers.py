@@ -33,6 +33,11 @@ class ProviderError(Exception):
     pass
 
 
+class BudgetExhaustedError(Exception):
+    """Raised when all providers have hit their daily budget ceiling (Issue 4)"""
+    pass
+
+
 @dataclass
 class ProviderStats:
     calls: int = 0
@@ -475,7 +480,13 @@ class ProviderRegistry:
     def __init__(self):
         self.providers: Dict[str, BaseProvider] = {}
         self.routing: Dict[str, List[str]] = {}
+        # Issue 4: daily budget ceiling
+        self._daily_budget: Dict[str, int] = {}
+        self._daily_stats: Dict[str, int] = {"calls": 0, "tokens_est": 0}
+        self._daily_stats_path = Path(__file__).parent.parent.parent / "data" / "daily_llm_stats.json"
         self._initialize()
+        self._load_daily_budget()
+        self._load_daily_stats()
 
     def _initialize(self):
         # Groq Multi-Key (Primary for reasoning)
@@ -543,6 +554,71 @@ class ProviderRegistry:
 
         logger.info(f"Initialized providers: {list(self.providers.keys())}")
 
+    # ── Issue 4: Budget helpers ────────────────────────────────────────────────
+
+    def _load_daily_budget(self):
+        """Load LLM budget ceilings from settings.yaml."""
+        try:
+            from src.config import load_settings
+            settings = load_settings()
+            budget_cfg = settings.get("llm_budget", {})
+            self._daily_budget = {
+                "tokens": budget_cfg.get("daily_token_budget", 120000),
+                "calls": budget_cfg.get("daily_call_budget", 300),
+                "run_tokens": budget_cfg.get("per_run_token_budget", 40000),
+                "run_calls": budget_cfg.get("per_run_call_budget", 80),
+            }
+            logger.info(f"Loaded LLM budget: {self._daily_budget}")
+        except Exception:
+            self._daily_budget = {"tokens": 120000, "calls": 300, "run_tokens": 40000, "run_calls": 80}
+
+    def _daily_stats_key(self) -> str:
+        """Return today's date string as the stats key."""
+        from datetime import datetime
+        return datetime.now().strftime("%Y-%m-%d")
+
+    def _load_daily_stats(self):
+        """Load persisted daily stats; reset if date has rolled over."""
+        try:
+            if self._daily_stats_path.exists():
+                with open(self._daily_stats_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if data.get("date") == self._daily_stats_key():
+                    self._daily_stats = data.get("stats", self._daily_stats)
+                    return
+        except Exception:
+            pass
+        # Date rolled over or file missing — start fresh
+        self._daily_stats = {"calls": 0, "tokens_est": 0}
+
+    def _persist_daily_stats(self):
+        """Persist daily stats to disk."""
+        try:
+            self._daily_stats_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._daily_stats_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "date": self._daily_stats_key(),
+                    "stats": self._daily_stats,
+                }, f)
+        except Exception:
+            pass
+
+    def _check_budget(self) -> bool:
+        """Issue 4: Return True if we are still within daily budget; False if exhausted."""
+        if self._daily_stats["calls"] >= self._daily_budget.get("calls", 300):
+            return False
+        if self._daily_stats["tokens_est"] >= self._daily_budget.get("tokens", 120000):
+            return False
+        return True
+
+    def _record_call(self, estimated_tokens: int = 700):
+        """Increment daily counters and persist periodically."""
+        self._daily_stats["calls"] += 1
+        self._daily_stats["tokens_est"] += estimated_tokens
+        # Persist every 10 calls to avoid excessive disk writes
+        if self._daily_stats["calls"] % 10 == 0:
+            self._persist_daily_stats()
+
     def get_provider(self, name: str) -> Optional[BaseProvider]:
         return self.providers.get(name)
 
@@ -589,25 +665,55 @@ class ProviderRegistry:
         temperature: float = 0.1,
         min_agree: int = 2
     ) -> Optional[Dict]:
-        """Execute with ensemble fallback"""
+        """Execute with ensemble fallback (Issue 4: enforces daily budget ceiling)"""
+        # Issue 4: check daily budget before starting
+        if not self._check_budget():
+            logger.warning(
+                f"Budget exhausted: {self._daily_stats['calls']} calls / "
+                f"{self._daily_stats['tokens_est']} est tokens today"
+            )
+            raise BudgetExhaustedError(
+                f"Daily budget hit: {self._daily_stats['calls']}/{self._daily_budget['calls']} calls, "
+                f"{self._daily_stats['tokens_est']}/{self._daily_budget['tokens']} est tokens"
+            )
+
         route = self.routing.get(task_type, ["groq_70b", "cerebras", "openrouter", "gemini"])
         results = []
 
         for provider_name in route:
+            # Issue 4: re-check budget before each provider attempt
+            if not self._check_budget():
+                logger.warning("Budget hit mid-fallback — stopping")
+                break
+
             provider = self.providers.get(provider_name)
             if not provider:
                 continue
 
             try:
                 result = provider.generate(prompt, system, max_tokens, temperature)
+                # Track per-run stats
+                _run_stats["total_calls"] += 1
+                _run_stats["calls_by_provider"][provider_name] = (
+                    _run_stats["calls_by_provider"].get(provider_name, 0) + 1
+                )
+                # Issue 4: track daily stats
+                self._record_call(estimated_tokens=max_tokens)
+
                 if result:
                     results.append({"provider": provider_name, "result": result})
                     if len(results) >= min_agree:
                         break
             except RateLimitError:
+                _run_stats["total_calls"] += 1
+                _run_stats["total_errors"] += 1
+                self._record_call()
                 logger.warning(f"{provider_name} rate limited, trying next")
                 continue
             except Exception as e:
+                _run_stats["total_calls"] += 1
+                _run_stats["total_errors"] += 1
+                self._record_call()
                 logger.warning(f"{provider_name} failed: {e}")
                 continue
 
@@ -681,9 +787,39 @@ class ProviderRegistry:
     def get_all_stats(self) -> Dict:
         return {name: p.get_stats() for name, p in self.providers.items()}
 
+    def shutdown(self):
+        """Persist daily stats on shutdown (Issue 4)."""
+        self._persist_daily_stats()
+
 
 # Global registry instance
 _registry: Optional[ProviderRegistry] = None
+
+# Problem 10: Per-run usage tracking
+_run_stats = {
+    "total_calls": 0,
+    "total_errors": 0,
+    "calls_by_provider": {},
+    "tokens_estimated": 0,
+    "start_time": 0,
+}
+
+
+def get_run_stats() -> Dict:
+    """Get per-run usage stats."""
+    return _run_stats.copy()
+
+
+def reset_run_stats():
+    """Reset per-run stats (call at start of each run)."""
+    global _run_stats
+    _run_stats = {
+        "total_calls": 0,
+        "total_errors": 0,
+        "calls_by_provider": {},
+        "tokens_estimated": 0,
+        "start_time": time.time(),
+    }
 
 
 def get_registry() -> ProviderRegistry:
@@ -691,3 +827,36 @@ def get_registry() -> ProviderRegistry:
     if _registry is None:
         _registry = ProviderRegistry()
     return _registry
+
+
+def print_run_stats():
+    """Print per-run usage summary (call at end of each run). Persists daily stats (Issue 4)."""
+    elapsed = time.time() - _run_stats["start_time"] if _run_stats["start_time"] else 0
+
+    print("\n📊 RUN USAGE STATS:")
+    print(f"   Duration:           {elapsed:.1f}s")
+    print(f"   Total LLM calls:    {_run_stats['total_calls']}")
+    print(f"   Total errors:       {_run_stats['total_errors']}")
+    for provider, count in _run_stats["calls_by_provider"].items():
+        print(f"   {provider:20s}: {count} calls")
+
+    est_tokens = _run_stats["total_calls"] * 700
+    print(f"   Est. tokens used:   ~{est_tokens:,}")
+
+    # Issue 4: show daily budget remaining
+    registry = get_registry()
+    daily_calls = registry._daily_stats.get("calls", 0)
+    daily_tokens = registry._daily_stats.get("tokens_est", 0)
+    call_budget = registry._daily_budget.get("calls", 300)
+    token_budget = registry._daily_budget.get("tokens", 120000)
+    print(f"   Daily calls:        {daily_calls}/{call_budget} ({call_budget - daily_calls} remaining)")
+    print(f"   Daily est tokens:   ~{daily_tokens:,}/{token_budget:,} ({token_budget - daily_tokens:,} remaining)")
+
+    groq_daily_limit = 100000
+    if est_tokens > groq_daily_limit * 0.8:
+        print(f"\n   ⚠️  WARNING: Approaching daily Groq limit ({groq_daily_limit:,} tokens)")
+
+    # Issue 4: persist daily stats
+    registry._persist_daily_stats()
+
+    print()

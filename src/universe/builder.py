@@ -1,7 +1,9 @@
 """
 Dynamic Universe Builder
-Scans Screener.in, NSE, and sector mappings to build tradeable universe
-Price: ₹50-500 | Market Cap: ₹100-5000 Cr | Liquidity: >₹50L/day
+Pulls FULL small-cap list from Screener.in (no sector bias),
+then validates via yfinance and tags with sector labels.
+
+Flow: Screener.in discovery → yfinance validation → safety filter → sector tagging
 """
 import json
 import logging
@@ -23,6 +25,7 @@ logger = logging.getLogger(__name__)
 UNIVERSE_CACHE = DATA_DIR / "universe_cache.json"
 UNIVERSE_TTL_DAYS = 7
 UNIVERSE_CHANGE_LOG = DATA_DIR / "universe_changes.jsonl"
+FULL_NSE_CACHE = DATA_DIR / "full_nse_stocks.json"
 
 
 @dataclass
@@ -36,17 +39,91 @@ class Stock:
     last_updated: str
     keywords: List[str]
     exchange: str = "NSE"
+    circuit_limit: float = 0.0
 
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict) -> "Stock":
-        return cls(**d)
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+
+def passes_stock_safety_filter(
+    price: float,
+    market_cap_cr: float,
+    avg_volume_lakh: float = 0,
+    avg_daily_value_cr: float = 0,
+) -> bool:
+    """
+    Single safety filter used everywhere — universe build, on-the-fly validation, etc.
+    Returns True if the stock passes ALL minimum safety checks.
+    """
+    from src.config import get_universe_config
+    cfg = get_universe_config()
+
+    price_min = cfg.get("price_min", 50)
+    price_max = cfg.get("price_max", 500)
+    cap_min = cfg.get("market_cap_min_cr", 100)
+    cap_max = cfg.get("market_cap_max_cr", 5000)
+    vol_min = cfg.get("min_avg_daily_volume_lakh", 50)
+    value_min_cr = cfg.get("min_avg_daily_value_cr", 1.0)
+
+    if not (price_min <= price <= price_max):
+        return False
+    if not (cap_min <= market_cap_cr <= cap_max):
+        return False
+    if avg_volume_lakh > 0 and avg_volume_lakh < vol_min:
+        return False
+    if avg_daily_value_cr > 0 and avg_daily_value_cr < value_min_cr:
+        return False
+
+    return True
+
+
+def check_circuit_history(ticker: str, days: int = 30) -> dict:
+    """
+    Problem 8: Check if a stock has hit any circuits recently.
+    Recent circuit hits count AGAINST a stock (hard to exit).
+    Returns: {"has_circuit_hits": bool, "circuit_days": int, "max_lower_circuit_pct": float}
+    """
+    try:
+        t = yf.Ticker(ticker)
+        hist = t.history(period=f"{days}d")
+        if hist.empty or len(hist) < 2:
+            return {"has_circuit_hits": False, "circuit_days": 0, "max_lower_circuit_pct": 0}
+
+        circuit_days = 0
+        max_lower_pct = 0
+
+        for i in range(1, len(hist)):
+            prev_close = float(hist["Close"].iloc[i - 1])
+            curr_close = float(hist["Close"].iloc[i])
+            if prev_close > 0:
+                change_pct = abs((curr_close - prev_close) / prev_close * 100)
+                # Indian markets have 5% or 10% circuit limits
+                # A move of exactly 4.9-5.1% or 9.9-10.1% suggests circuit hit
+                if (4.8 <= change_pct <= 5.2) or (9.8 <= change_pct <= 10.2) or change_pct >= 19.5:
+                    circuit_days += 1
+                    if curr_close < prev_close:
+                        max_lower_pct = max(max_lower_pct, change_pct)
+
+        return {
+            "has_circuit_hits": circuit_days > 0,
+            "circuit_days": circuit_days,
+            "max_lower_circuit_pct": round(max_lower_pct, 2),
+        }
+
+    except Exception as e:
+        logger.debug(f"Circuit check failed for {ticker}: {e}")
+        return {"has_circuit_hits": False, "circuit_days": 0, "max_lower_circuit_pct": 0}
 
 
 class UniverseBuilder:
-    """Builds and maintains the tradeable stock universe"""
+    """
+    Builds the tradeable stock universe.
+    NEW flow: Screener.in discovery (no sector bias) → yfinance validation → safety filter → sector tagging
+    """
 
     def __init__(self):
         self.universe: Dict[str, Stock] = {}
@@ -54,28 +131,35 @@ class UniverseBuilder:
         self.sector_tickers = get_all_sector_tickers()
 
     def build(self, force_refresh: bool = False) -> Dict[str, Stock]:
-        """Build universe from multiple sources"""
+        """Build universe: Screener.in first, then validate, then tag sectors."""
         if not force_refresh and self._load_cache():
             logger.info(f"Loaded {len(self.universe)} stocks from cache")
             return self.universe
 
-        logger.info("Building universe from scratch...")
+        logger.info("Building universe from scratch (Screener.in → yfinance → sector tagging)...")
 
-        # 1. Get known tickers from sector config
-        known_tickers = self._get_all_known_tickers()
-
-        # 2. Discover from Screener.in queries
+        # 1. Discover ALL small-caps from Screener.in (no sector bias)
         screener_tickers = self._discover_from_screener()
+        logger.info(f"Screener.in discovered {len(screener_tickers)} tickers")
 
-        # 3. Combine and validate
-        all_tickers = known_tickers | screener_tickers
-        logger.info(f"Validating {len(all_tickers)} candidate tickers...")
+        # 2. Add known sector tickers for tagging reference (NOT as a gate)
+        sector_ref_tickers = self._get_sector_reference_tickers()
+        all_candidates = screener_tickers | sector_ref_tickers
+        logger.info(f"Total candidates: {len(all_candidates)} (screener + sector ref)")
 
-        # 4. Fetch fundamental data in parallel
-        validated = self._validate_tickers(all_tickers)
+        # 3. Validate via yfinance (price, market cap, volume)
+        validated = self._validate_tickers(all_candidates)
 
-        # 5. Apply filters
-        filtered = self._apply_filters(validated)
+        # 4. Apply safety filter (single function used everywhere)
+        filtered = {}
+        for ticker, stock in validated.items():
+            if passes_stock_safety_filter(stock.price, stock.market_cap_cr, stock.avg_volume_lakh):
+                filtered[ticker] = stock
+            else:
+                logger.debug(f"Filtered out: {ticker} ({stock.name}) — price={stock.price}, cap={stock.market_cap_cr}Cr")
+
+        # 5. Tag sectors (label added AFTER filtering, not before)
+        self._tag_sectors(filtered)
 
         # 6. Enrich with keywords
         self._enrich_keywords(filtered)
@@ -87,8 +171,8 @@ class UniverseBuilder:
         logger.info(f"Universe built: {len(self.universe)} tradeable stocks")
         return self.universe
 
-    def _get_all_known_tickers(self) -> Set[str]:
-        """Get all tickers from sector config (try both NSE and BSE)"""
+    def _get_sector_reference_tickers(self) -> Set[str]:
+        """Get sector tickers as a reference pool (not a gate). These get validated like everything else."""
         tickers = set()
         for sector_tickers in self.sector_tickers.values():
             for t in sector_tickers:
@@ -100,67 +184,88 @@ class UniverseBuilder:
         return tickers
 
     def _discover_from_screener(self) -> Set[str]:
-        """Discover new tickers from Screener.in queries"""
+        """
+        Discover small-cap stocks from Screener.in using fundamental filters.
+        No sector bias — just price, market cap, and volume.
+        """
         discovered = set()
 
+        # Multiple queries to cast a wide net
         queries = [
-            "marketcap:100to5000",
-            "price:50to500",
-            "volume:>5000000",
+            "marketcap:100to5000+price:50to500",
+            "marketcap:100to5000+volume:>5000000",
+            "price:50to200+marketcap:100to2000",
+            "price:200to500+marketcap:200to5000",
+            "current_ratio:>1.5+price:50to500+marketcap:100to5000",
+            "roe:>+15+price:50to500+marketcap:100to5000",
         ]
 
         for query in queries:
             try:
                 url = f"https://www.screener.in/screens/?q={query}"
-                resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+                resp = requests.get(
+                    url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                        "Accept": "text/html,application/xhtml+xml",
+                    },
+                    timeout=15,
+                )
+                if resp.status_code != 200:
+                    logger.debug(f"Screener query '{query}' returned {resp.status_code}")
+                    continue
+
                 soup = BeautifulSoup(resp.text, "lxml")
 
-                # Parse table rows
                 for row in soup.select("table.data-table tr"):
                     link = row.select_one("td a[href*='/company/']")
                     if link:
                         ticker = link["href"].split("/")[-1].upper()
-                        if ticker.endswith(".NS"):
-                            discovered.add(ticker)
-                        elif "." not in ticker:
-                            discovered.add(f"{ticker}.NS")
+                        if "." not in ticker:
+                            ticker = f"{ticker}.NS"
+                        discovered.add(ticker)
 
-                time.sleep(1)  # Rate limit
+                time.sleep(1.5)  # Rate limit
 
             except Exception as e:
-                logger.warning(f"Screener discovery failed for {query}: {e}")
+                logger.warning(f"Screener discovery failed for '{query}': {e}")
 
+        logger.info(f"Screener.in discovered {len(discovered)} unique tickers")
         return discovered
 
     def _validate_tickers(self, tickers: Set[str]) -> Dict[str, Stock]:
-        """Fetch and validate fundamental data, with NSE→BSE fallback"""
+        """Fetch and validate fundamental data via yfinance, with NSE→BSE fallback."""
         validated = {}
-        
+
         # Separate into NSE and BSE tickers
         nse_tickers = {t for t in tickers if t.endswith(".NS")}
         bse_tickers = {t for t in tickers if t.endswith(".BO")}
-        
+
         # Group by base ticker
         base_to_nse = {t.replace(".NS", ""): t for t in nse_tickers}
         base_to_bse = {t.replace(".BO", ""): t for t in bse_tickers}
-        
-        # Try NSE first, then BSE for each base ticker
+
         all_bases = set(base_to_nse.keys()) | set(base_to_bse.keys())
-        
+
         # Batch process in chunks
         chunk_size = 50
         base_list = list(all_bases)
-        
+
         for i in range(0, len(base_list), chunk_size):
-            chunk_bases = base_list[i:i + chunk_size]
+            chunk_bases = base_list[i : i + chunk_size]
             self._fetch_chunk_with_fallback(chunk_bases, base_to_nse, base_to_bse, validated)
             time.sleep(0.5)
 
         return validated
 
-    def _fetch_chunk_with_fallback(self, bases: List[str], base_to_nse: Dict, base_to_bse: Dict, out: Dict[str, Stock]):
-        """Fetch chunk with NSE→BSE fallback"""
-        # Build list of tickers to try (NSE first)
+    def _fetch_chunk_with_fallback(
+        self,
+        bases: List[str],
+        base_to_nse: Dict,
+        base_to_bse: Dict,
+        out: Dict[str, Stock],
+    ):
+        """Fetch chunk with NSE→BSE fallback."""
         to_try = []
         for base in bases:
             if base in base_to_nse:
@@ -168,7 +273,6 @@ class UniverseBuilder:
             elif base in base_to_bse:
                 to_try.append((base, base_to_bse[base], "BSE"))
 
-        # Batch fetch
         tickers_str = " ".join(t[1] for t in to_try)
         try:
             data = yf.Tickers(tickers_str)
@@ -190,26 +294,26 @@ class UniverseBuilder:
                 price = info.get("regularMarketPrice", 0)
                 market_cap = info.get("marketCap", 0)
                 volume = info.get("averageVolume", 0)
+                avg_vol_lakh = round(volume * price / 1e5, 1) if volume and price else 0
 
-                if not (50 <= price <= 500):
-                    continue
-                if not (100e7 <= market_cap <= 5000e7):
-                    continue
-                if not (volume * price >= 50e5):
+                # Raw data — safety filter applied later
+                if price <= 0:
                     continue
 
-                sector = self._classify_sector(info.get("longName", ""), info.get("sector", ""), ticker)
+                sector = self._classify_sector(
+                    info.get("longName", ""), info.get("sector", ""), ticker
+                )
 
                 out[ticker] = Stock(
                     ticker=ticker,
                     name=info.get("longName", ticker),
-                    sector=sector,
+                    sector=sector,  # Will be re-tagged later
                     price=price,
-                    market_cap_cr=round(market_cap / 1e7, 1),
-                    avg_volume_lakh=round(volume * price / 1e5, 1),
+                    market_cap_cr=round(market_cap / 1e7, 1) if market_cap else 0,
+                    avg_volume_lakh=avg_vol_lakh,
                     last_updated=datetime.now().isoformat(),
                     keywords=[],
-                    exchange=exchange
+                    exchange=exchange,
                 )
 
             except Exception as e:
@@ -221,7 +325,7 @@ class UniverseBuilder:
             for base in failed_nse:
                 if base in base_to_bse:
                     bse_retry.append((base, base_to_bse[base]))
-            
+
             if bse_retry:
                 retry_str = " ".join(t[1] for t in bse_retry)
                 try:
@@ -236,25 +340,24 @@ class UniverseBuilder:
                             price = info.get("regularMarketPrice", 0)
                             market_cap = info.get("marketCap", 0)
                             volume = info.get("averageVolume", 0)
+                            avg_vol_lakh = round(volume * price / 1e5, 1) if volume and price else 0
 
-                            if not (50 <= price <= 500):
-                                continue
-                            if not (100e7 <= market_cap <= 5000e7):
-                                continue
-                            if not (volume * price >= 50e5):
+                            if price <= 0:
                                 continue
 
-                            sector = self._classify_sector(info.get("longName", ""), info.get("sector", ""))
+                            sector = self._classify_sector(
+                                info.get("longName", ""), info.get("sector", "")
+                            )
                             out[ticker] = Stock(
                                 ticker=ticker,
                                 name=info.get("longName", ticker),
                                 sector=sector,
                                 price=price,
-                                market_cap_cr=round(market_cap / 1e7, 1),
-                                avg_volume_lakh=round(volume * price / 1e5, 1),
+                                market_cap_cr=round(market_cap / 1e7, 1) if market_cap else 0,
+                                avg_volume_lakh=avg_vol_lakh,
                                 last_updated=datetime.now().isoformat(),
                                 keywords=[],
-                                exchange="BSE"
+                                exchange="BSE",
                             )
                         except Exception:
                             pass
@@ -262,7 +365,7 @@ class UniverseBuilder:
                     pass
 
     def _classify_sector(self, name: str, yf_sector: str, ticker: str = "") -> str:
-        """Classify stock into our sectors"""
+        """Classify stock into our sectors (initial classification, may be overridden by _tag_sectors)"""
         # Manual overrides for known stocks
         manual_map = {
             "GHCL.NS": "chemicals_specialty",
@@ -300,53 +403,39 @@ class UniverseBuilder:
         }
         return yf_map.get(yf_sector.lower(), "other")
 
-    def _apply_filters(self, stocks: Dict[str, Stock]) -> Dict[str, Stock]:
-        """Apply rule-based filters from config/settings.yaml"""
-        from src.config import get_universe_config
-
-        config = get_universe_config()
-        filtered = {}
-        rejected = []
-
-        price_min = config.get("price_min", 50)
-        price_max = config.get("price_max", 500)
-        cap_min = config.get("market_cap_min_cr", 100)
-        cap_max = config.get("market_cap_max_cr", 5000)
-        vol_min = config.get("min_avg_daily_volume_lakh", 50)
-        value_min_cr = config.get("min_avg_daily_value_cr", 1.0)
+    def _tag_sectors(self, stocks: Dict[str, Stock]):
+        """
+        Tag each stock with a sector label AFTER filtering.
+        Uses: (1) known sector tickers, (2) yfinance sector, (3) name/keyword matching.
+        Sector becomes a label, not a gate.
+        """
+        # Build reverse map: ticker → sector from config
+        config_sector_map = {}
+        for sector, tickers in self.sector_tickers.items():
+            for t in tickers:
+                base = t.replace(".NS", "").replace(".BO", "")
+                config_sector_map[base.upper()] = sector
+                config_sector_map[f"{base}.NS"] = sector
 
         for ticker, stock in stocks.items():
-            # Price filter
-            if not (price_min <= stock.price <= price_max):
-                rejected.append((ticker, stock.name, f"price ₹{stock.price:.2f} not in ₹{price_min}-{price_max}"))
+            base = ticker.replace(".NS", "").replace(".BO", "")
+
+            # Priority 1: config sector mapping
+            if base in config_sector_map:
+                stock.sector = config_sector_map[base]
                 continue
 
-            # Market cap filter
-            if not (cap_min <= stock.market_cap_cr <= cap_max):
-                rejected.append((ticker, stock.name, f"cap ₹{stock.market_cap_cr:.0f}Cr not in {cap_min}-{cap_max}Cr"))
-                continue
-
-            # Volume filter (in lakh)
-            if stock.avg_volume_lakh < vol_min:
-                rejected.append((ticker, stock.name, f"volume {stock.avg_volume_lakh:.1f}L < {vol_min}L"))
-                continue
-
-            # Daily traded value filter (price * volume in Cr)
-            daily_value_cr = stock.price * stock.avg_volume_lakh * 1e5 / 1e7  # price * vol_lakh * 1e5 / 1e7
-            if daily_value_cr < value_min_cr:
-                rejected.append((ticker, stock.name, f"daily value ₹{daily_value_cr:.2f}Cr < ₹{value_min_cr}Cr"))
-                continue
-
-            filtered[ticker] = stock
-
-        # Log changes if enabled
-        if config.get("log_changes", True) and rejected:
-            self._log_changes(new_stocks=set(filtered.keys()), rejected=rejected)
-
-        if rejected:
-            logger.info(f"Universe filters: {len(filtered)} passed, {len(rejected)} rejected")
-
-        return filtered
+            # Priority 2: name + yfinance sector keyword matching
+            text = (stock.name + " " + stock.sector).lower()
+            best_sector = "other"
+            best_score = 0
+            for sector, keywords in self.sector_keywords.items():
+                score = sum(1 for kw in keywords if kw.lower() in text)
+                if score > best_score:
+                    best_score = score
+                    best_sector = sector
+            if best_score > 0:
+                stock.sector = best_sector
 
     def _log_changes(self, new_stocks: set, rejected: list):
         """Log universe changes for bias detection."""
@@ -566,7 +655,7 @@ _KNOWN_TICKER_MAP = {
 def _search_ticker_by_name(company_name: str) -> Optional[tuple]:
     """
     Search for a ticker by company name using yfinance search.
-    Returns (ticker, Stock) if found, None if not.
+    Returns (ticker, Stock) if found and passes safety filter, None if not.
     """
     import yfinance as yf
 
@@ -594,8 +683,15 @@ def _search_ticker_by_name(company_name: str) -> Optional[tuple]:
             market_cap = info.get("marketCap", 0)
             volume = info.get("averageVolume", 0)
             name = info.get("longName", company_name)
+            avg_vol_lakh = round(volume * price / 1e5, 1) if volume and price else 0
+            market_cap_cr = round(market_cap / 1e7, 1) if market_cap else 0
 
             if price <= 0:
+                continue
+
+            # SAME safety filter as universe build (Problem 3)
+            if not passes_stock_safety_filter(price, market_cap_cr, avg_vol_lakh):
+                logger.debug(f"Name search '{company_name}' -> {symbol} failed safety filter (price={price}, cap={market_cap_cr}Cr)")
                 continue
 
             builder = get_universe_builder()
@@ -606,8 +702,8 @@ def _search_ticker_by_name(company_name: str) -> Optional[tuple]:
                 name=name,
                 sector=sector,
                 price=price,
-                market_cap_cr=round(market_cap / 1e7, 1) if market_cap else 0,
-                avg_volume_lakh=round(volume * price / 1e5, 1) if volume and price else 0,
+                market_cap_cr=market_cap_cr,
+                avg_volume_lakh=avg_vol_lakh,
                 last_updated=datetime.now().isoformat(),
                 keywords=[],
                 exchange="NSE" if symbol.endswith(".NS") else "BSE",
@@ -628,6 +724,7 @@ def _search_ticker_by_name(company_name: str) -> Optional[tuple]:
 def validate_ticker_on_the_fly(ticker: str, company_name: str = "") -> Optional[tuple]:
     """
     Validate a ticker not in the universe by fetching from yfinance.
+    Uses the SAME safety filter as universe build (Problem 3).
     Returns (actual_ticker, Stock) if valid, None if not.
     Caches results to avoid repeated yfinance calls.
     """
@@ -655,7 +752,10 @@ def validate_ticker_on_the_fly(ticker: str, company_name: str = "") -> Optional[
                     market_cap = info.get("marketCap", 0)
                     volume = info.get("averageVolume", 0)
                     name = info.get("longName", normalized)
-                    if price > 0:
+                    avg_vol_lakh = round(volume * price / 1e5, 1) if volume and price else 0
+                    market_cap_cr = round(market_cap / 1e7, 1) if market_cap else 0
+
+                    if price > 0 and passes_stock_safety_filter(price, market_cap_cr, avg_vol_lakh):
                         builder = get_universe_builder()
                         sector = builder._classify_sector(name, info.get("sector", ""), mapped_ticker)
                         stock = Stock(
@@ -663,8 +763,8 @@ def validate_ticker_on_the_fly(ticker: str, company_name: str = "") -> Optional[
                             name=name,
                             sector=sector,
                             price=price,
-                            market_cap_cr=round(market_cap / 1e7, 1) if market_cap else 0,
-                            avg_volume_lakh=round(volume * price / 1e5, 1) if volume and price else 0,
+                            market_cap_cr=market_cap_cr,
+                            avg_volume_lakh=avg_vol_lakh,
                             last_updated=datetime.now().isoformat(),
                             keywords=[],
                             exchange="NSE" if mapped_ticker.endswith(".NS") else "BSE",
@@ -693,8 +793,15 @@ def validate_ticker_on_the_fly(ticker: str, company_name: str = "") -> Optional[
             market_cap = info.get("marketCap", 0)
             volume = info.get("averageVolume", 0)
             name = info.get("longName", base)
+            avg_vol_lakh = round(volume * price / 1e5, 1) if volume and price else 0
+            market_cap_cr = round(market_cap / 1e7, 1) if market_cap else 0
 
             if price <= 0:
+                continue
+
+            # SAME safety filter as universe build (Problem 3)
+            if not passes_stock_safety_filter(price, market_cap_cr, avg_vol_lakh):
+                logger.debug(f"Dynamic validation {t} failed safety filter (price={price}, cap={market_cap_cr}Cr)")
                 continue
 
             builder = get_universe_builder()
@@ -705,8 +812,8 @@ def validate_ticker_on_the_fly(ticker: str, company_name: str = "") -> Optional[
                 name=name,
                 sector=sector,
                 price=price,
-                market_cap_cr=round(market_cap / 1e7, 1) if market_cap else 0,
-                avg_volume_lakh=round(volume * price / 1e5, 1) if volume and price else 0,
+                market_cap_cr=market_cap_cr,
+                avg_volume_lakh=avg_vol_lakh,
                 last_updated=datetime.now().isoformat(),
                 keywords=[],
                 exchange="NSE" if t.endswith(".NS") else "BSE",

@@ -3,13 +3,15 @@ Analysis Pipeline
 4-Stage: Quick Filter → Triage → Entity Extraction → Impact Analysis → Trade Setup
 Optimized with pre-filtering and parallel execution
 """
+import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict, field
+from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 
-from src.ai.providers import get_registry
+from src.ai.providers import get_registry, BudgetExhaustedError
 from src.ai.prompts import (
     build_triage_prompt,
     build_entity_prompt,
@@ -20,6 +22,43 @@ from src.ai.prompts import (
 from src.universe.ticker_map import extract_tickers, resolve_ticker, get_mapper
 
 logger = logging.getLogger(__name__)
+
+# ── NSE/BSE real lookup table (Issue 1) ──────────────────────────────────────
+_NSE_BSE_LOOKUP: Dict[str, str] = {}
+_UNRESOLVED_LOG_PATH = Path(__file__).parent.parent.parent / "data" / "unresolved_candidates.jsonl"
+
+
+def _load_nse_bse_lookup() -> Dict[str, str]:
+    """Load the NSE/BSE company name→ticker lookup from config."""
+    global _NSE_BSE_LOOKUP
+    if _NSE_BSE_LOOKUP:
+        return _NSE_BSE_LOOKUP
+    lookup_path = Path(__file__).parent.parent.parent / "config" / "nse_bse_tickers.json"
+    try:
+        with open(lookup_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        _NSE_BSE_LOOKUP = {k.lower(): v for k, v in data.get("lookup", {}).items()}
+        logger.info(f"Loaded {len(_NSE_BSE_LOOKUP)} NSE/BSE ticker entries")
+    except Exception as e:
+        logger.warning(f"Failed to load NSE/BSE ticker lookup: {e}")
+        _NSE_BSE_LOOKUP = {}
+    return _NSE_BSE_LOOKUP
+
+
+def _log_unresolved_candidate(article_title: str, extracted_names: List[str], source: str = ""):
+    """Append unresolved company names for periodic review."""
+    try:
+        _UNRESOLVED_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "ts": datetime.now().isoformat(),
+            "title": article_title[:120],
+            "names": extracted_names,
+            "source": source,
+        }
+        with open(_UNRESOLVED_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 @dataclass
@@ -179,11 +218,16 @@ class AnalysisPipeline:
                 logger.debug(f"REJECTED (weak/long): {title} — strength={triage.catalyst_strength}, time={triage.time_sensitivity}")
                 return None
 
-            # PR/Pump risk filter
+            # PR/Pump risk filter (Problem 7: company PR alone should never trigger signal)
             if triage.pr_pump_risk == "HIGH":
                 logger.warning(f"REJECTED (high PR/pump risk): {title} — flags: {triage.pr_pump_flags}")
                 return None
             if triage.pr_pump_risk == "MEDIUM":
+                # Problem 7: If source is tier 3-4 (niche/corporate) AND medium PR risk, reject
+                source_tier = getattr(triage, 'source_tier_note', '')
+                if 'Tier 4' in source_tier or 'Tier 3' in source_tier:
+                    logger.warning(f"REJECTED (medium PR/pump risk from low-tier source): {title}")
+                    return None
                 logger.info(f"Note: {title} — medium PR/pump risk, will reduce confidence")
 
             # Stage 2: Entity Extraction
@@ -226,6 +270,9 @@ class AnalysisPipeline:
 
             return output
 
+        except BudgetExhaustedError as e:
+            logger.warning(f"Budget exhausted during analysis of '{title}': {e}")
+            return None
         except Exception as e:
             logger.error(f"Pipeline error for '{title}': {e}")
             return None
@@ -342,18 +389,15 @@ class AnalysisPipeline:
 
             stock = self.mapper.universe[ticker]
 
-            # Hard filter: reject penny stocks (<₹30) and micro-caps (<₹50Cr)
-            if stock.market_cap_cr < 50:
-                logger.warning(f"DISCARDED: {ticker} ({stock.name}) — micro-cap ₹{stock.market_cap_cr:.0f}Cr")
-                continue
-            if stock.price < 30:
-                logger.warning(f"DISCARDED: {ticker} ({stock.name}) — price ₹{stock.price:.2f} below ₹30")
+            # Same safety filter as universe build (Problem 3: one filter function everywhere)
+            from src.universe.builder import passes_stock_safety_filter
+            avg_vol_lakh = stock.avg_volume_lakh if hasattr(stock, 'avg_volume_lakh') else 0
+            if not passes_stock_safety_filter(stock.price, stock.market_cap_cr, avg_vol_lakh):
+                logger.warning(f"DISCARDED: {ticker} ({stock.name}) — failed safety filter (price=₹{stock.price:.2f}, cap=₹{stock.market_cap_cr:.0f}Cr)")
                 continue
 
-            # Soft filter: allow large-caps but flag them (lower priority)
+            # Soft filter: allow large-caps but penalize confidence
             is_large_cap = stock.market_cap_cr > 5000
-            if is_large_cap:
-                logger.info(f"Note: {ticker} ({stock.name}) — large-cap ₹{stock.market_cap_cr:.0f}Cr, included with lower priority")
 
             try:
                 pred_obj = ImpactPrediction.from_dict(p)
@@ -370,7 +414,7 @@ class AnalysisPipeline:
         return predictions
 
     def _create_trade(self, pred: ImpactPrediction, triage: TriageResult) -> Optional[TradePlan]:
-        """Stage 4: Create executable trade plan"""
+        """Stage 4: Create executable trade plan (with circuit history check for Problem 8)"""
         # Get current price from universe (try multiple ticker formats)
         stock = self.mapper.universe.get(pred.ticker)
         if not stock:
@@ -397,6 +441,18 @@ class AnalysisPipeline:
             current_price = 0
         else:
             current_price = stock.price
+
+        # Problem 8: Check circuit history — recent circuit hits make exit difficult
+        from src.universe.builder import check_circuit_history
+        circuit_info = check_circuit_history(pred.ticker, days=30)
+        if circuit_info["has_circuit_hits"] and circuit_info["circuit_days"] >= 2:
+            logger.warning(
+                f"CIRCUIT RISK: {pred.ticker} hit circuit {circuit_info['circuit_days']} times in 30 days "
+                f"(max lower: {circuit_info['max_lower_circuit_pct']}%) — penalizing confidence"
+            )
+            # Reduce confidence based on circuit frequency
+            circuit_penalty = min(30, circuit_info["circuit_days"] * 10)
+            pred.confidence = max(50, pred.confidence - circuit_penalty)
 
         system, prompt = build_trade_prompt(pred.__dict__, current_price)
 
@@ -486,12 +542,23 @@ class AnalysisPipeline:
         }
 
     def analyze_batch(self, articles: List[any], max_signals: int = 5) -> List[Dict]:
-        """Analyze multiple articles, return top signals with pre-filtering"""
-        # Pre-filter: process articles that mention universe tickers OR small-cap keywords
+        """Analyze multiple articles, return top signals with pre-filtering.
+
+        Issue 1: Pre-filter now uses the real NSE/BSE ticker lookup table
+        (config/nse_bse_tickers.json) instead of regex pattern matching.
+        Articles pass if they mention:
+          (a) a ticker already in the live universe, OR
+          (b) a known company name/alias from the lookup table, OR
+          (c) a small-cap keyword (fallback to catch new companies).
+        """
+        nse_lookup = _load_nse_bse_lookup()
+        small_cap_keywords = [
+            'small cap', 'mid cap', 'micro cap', 'small-cap', 'mid-cap',
+            'multibagger', 'penny stock', 'small cap stock', 'mid cap stock',
+        ]
+
         filtered_articles = []
-        small_cap_keywords = ['small cap', 'mid cap', 'micro cap', 'small-cap', 'mid-cap', 
-                             'multibagger', 'penny stock', 'small cap stock', 'mid cap stock']
-        
+
         for article in articles:
             try:
                 if hasattr(article, 'to_dict'):
@@ -501,24 +568,40 @@ class AnalysisPipeline:
                 else:
                     continue
 
-                # Quick ticker check before full analysis
                 text = f"{article_dict.get('title', '')} {article_dict.get('content', '')[:1000]}"
-                found_tickers = extract_tickers(text)
-                
-                # Check for small-cap keywords
                 text_lower = text.lower()
+
+                # Check 1: Universe tickers (fast path via ticker_map)
+                found_tickers = extract_tickers(text)
+
+                # Check 2: Real NSE/BSE company name/alias lookup
+                matched_nse_names: List[str] = []
+                for name_key, ticker in nse_lookup.items():
+                    if len(name_key) < 4:
+                        continue
+                    if name_key in text_lower:
+                        matched_nse_names.append(f"{name_key} -> {ticker}")
+
+                has_nse_match = len(matched_nse_names) > 0
+
+                # Check 3: Small-cap keywords (catch-all for unknown companies)
                 has_small_cap_kw = any(kw in text_lower for kw in small_cap_keywords)
-                
-                # Process if article mentions a ticker in our universe OR has small-cap keywords
-                if found_tickers or has_small_cap_kw:
+
+                if found_tickers or has_nse_match or has_small_cap_kw:
                     article_dict['_matched_tickers'] = found_tickers
+                    article_dict['_matched_nse_names'] = matched_nse_names
                     article_dict['_has_small_cap_keyword'] = has_small_cap_kw
                     filtered_articles.append(article_dict)
-                    
+
             except Exception as e:
                 logger.warning(f"Pre-filter failed for article: {e}")
 
-        logger.info(f"Pre-filtered: {len(filtered_articles)}/{len(articles)} articles (tickers: {sum(1 for a in filtered_articles if a.get('_matched_tickers'))}, small-cap keywords: {sum(1 for a in filtered_articles if a.get('_has_small_cap_keyword'))})")
+        logger.info(
+            f"Pre-filtered: {len(filtered_articles)}/{len(articles)} articles "
+            f"(universe tickers: {sum(1 for a in filtered_articles if a.get('_matched_tickers'))}, "
+            f"NSE/BSE lookup: {sum(1 for a in filtered_articles if a.get('_matched_nse_names'))}, "
+            f"small-cap keywords: {sum(1 for a in filtered_articles if a.get('_has_small_cap_keyword'))})"
+        )
 
         if not filtered_articles:
             logger.warning("No articles passed pre-filter")
@@ -527,6 +610,7 @@ class AnalysisPipeline:
         # Process articles in parallel
         signals = []
         failed = 0
+        budget_hit = False
         with ThreadPoolExecutor(max_workers=3) as executor:
             future_to_article = {
                 executor.submit(self.analyze_article, article): article 
@@ -542,10 +626,16 @@ class AnalysisPipeline:
                             break
                     else:
                         failed += 1
+                except BudgetExhaustedError:
+                    budget_hit = True
+                    logger.warning("Budget exhausted in batch — returning partial results")
+                    break
                 except Exception as e:
                     failed += 1
                     logger.warning(f"Analysis failed: {e}")
 
+        if budget_hit:
+            logger.info(f"Pipeline stopped early (budget): {len(signals)} signals collected")
         logger.info(f"Pipeline complete: {len(signals)} signals from {len(filtered_articles)} articles ({failed} failed)")
 
         # Sort by confidence * R:R

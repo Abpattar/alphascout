@@ -20,7 +20,11 @@ DATA_DIR = Path(__file__).parent.parent.parent / "data"
 CALIBRATION_FILE = DATA_DIR / "confidence_calibration.json"
 
 # Minimum signals needed per bucket before calibration kicks in
-MIN_SIGNALS_PER_BUCKET = 5
+# Problem 5: Require 30+ signals per bucket before trusting the AI's confidence
+MIN_SIGNALS_PER_BUCKET = 30
+
+# Minimum total signals before auto-execution is allowed at all
+MIN_TOTAL_SIGNALS_FOR_AUTO = 50
 
 # Default calibration (used when no data yet — identity mapping)
 DEFAULT_CALIBRATION = {
@@ -122,10 +126,20 @@ class ConfidenceCalibrator:
     def should_auto_execute(self, raw_confidence: float, min_calibrated: float = 80) -> Tuple[bool, float, str]:
         """
         Check if a signal should auto-execute based on calibrated confidence.
+        Problem 5: Requires large sample before trusting confidence for auto-execution.
         Returns (should_execute, calibrated_confidence, reason).
         """
         calibrated = self.get_calibrated(raw_confidence)
-        n = self.calibration.get(self._bucket_key(raw_confidence), {}).get("n", 0)
+        bucket = self._bucket_key(raw_confidence)
+        n = self.calibration.get(bucket, {}).get("n", 0)
+
+        # Check minimum total signals across all buckets
+        total_signals = sum(b.get("n", 0) for b in self.calibration.values())
+        if total_signals < MIN_TOTAL_SIGNALS_FOR_AUTO:
+            return False, calibrated, (
+                f"Total signals too low ({total_signals}/{MIN_TOTAL_SIGNALS_FOR_AUTO}) — "
+                f"need more data before auto-executing"
+            )
 
         if n < MIN_SIGNALS_PER_BUCKET:
             return False, calibrated, f"Insufficient data ({n}/{MIN_SIGNALS_PER_BUCKET} signals in bucket)"
@@ -133,7 +147,7 @@ class ConfidenceCalibrator:
         if calibrated < min_calibrated:
             return False, calibrated, f"Calibrated {calibrated:.0f}% < min {min_calibrated}%"
 
-        return True, calibrated, f"Calibrated {calibrated:.0f}% meets threshold"
+        return True, calibrated, f"Calibrated {calibrated:.0f}% meets threshold (n={n})"
 
     def get_calibration_report(self) -> str:
         """Human-readable calibration report."""

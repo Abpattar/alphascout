@@ -1,6 +1,7 @@
 """
 Telegram Notifier
 Sends formatted trade alerts
+Issue 3: When personal_use_only is true, enforce single-recipient delivery.
 """
 import os
 import json
@@ -24,18 +25,49 @@ if CHAT_ID:
 
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else ""
 
+# Issue 3: personal-use enforcement
+_PERSONAL_USE_MODE = None
 
-async def send_message(text: str, parse_mode: str = "HTML") -> bool:
-    """Send message to Telegram"""
-    if not BOT_TOKEN or not CHAT_ID:
+
+def _is_personal_use() -> bool:
+    """Return True if personal_use_only is enabled in settings (cached)."""
+    global _PERSONAL_USE_MODE
+    if _PERSONAL_USE_MODE is None:
+        try:
+            from src.config import load_settings
+            _PERSONAL_USE_MODE = load_settings().get("portfolio", {}).get("personal_use_only", True)
+        except Exception:
+            _PERSONAL_USE_MODE = True  # default to safe mode
+    return _PERSONAL_USE_MODE
+
+
+def _validate_recipient(chat_id: int) -> bool:
+    """Issue 3: In personal_use_only mode, only allow the configured CHAT_ID."""
+    if _is_personal_use() and chat_id != CHAT_ID:
+        logger.warning(
+            f"BLOCKED: personal_use_only=True — refusing to send to chat_id={chat_id} "
+            f"(expected {CHAT_ID})"
+        )
+        return False
+    return True
+
+
+async def send_message(text: str, parse_mode: str = "HTML", chat_id: int = None) -> bool:
+    """Send message to Telegram. Issue 3: enforces single-recipient in personal_use_only mode."""
+    target_chat = chat_id or CHAT_ID
+    if not BOT_TOKEN or not target_chat:
         logger.warning("Telegram not configured — BOT_TOKEN or CHAT_ID missing")
+        return False
+
+    # Issue 3: validate recipient
+    if not _validate_recipient(target_chat):
         return False
 
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 f"{BASE_URL}/sendMessage",
-                json={"chat_id": CHAT_ID, "text": text, "parse_mode": parse_mode},
+                json={"chat_id": target_chat, "text": text, "parse_mode": parse_mode},
                 timeout=aiohttp.ClientTimeout(total=15),
                 ssl=SSL_CTX
             ) as resp:

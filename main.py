@@ -5,6 +5,7 @@ AlphaScout - Multi-Sector Small-Cap News -> Trade Signal Bot
 Main Entry Point
 """
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -54,6 +55,9 @@ async def run_pipeline(use_cache: bool = True, max_signals: int = 5) -> list:
     from src.scraping.scraper import scrape_all_sources
     from src.analysis.pipeline import analyze_articles
     from src.config import validate_api_keys, get_signals_config
+    from src.ai.providers import reset_run_stats, print_run_stats
+
+    reset_run_stats()  # Problem 10: track per-run usage
 
     # Validate API keys
     keys = validate_api_keys()
@@ -106,12 +110,15 @@ async def run_pipeline(use_cache: bool = True, max_signals: int = 5) -> list:
     else:
         print("\n⚠️  No qualifying signals found today")
 
+    print_run_stats()  # Problem 10: print per-run usage
     return signals
 
 
 async def run_screener_pipeline(use_cache: bool = True, max_signals: int = 5) -> list:
-    """Screener-first: find active small-caps, then search for news about them"""
-    from src.screening.screener import scan_for_active_smallcaps
+    """Screener-first: find active small-caps, then search for news about them.
+    Problem 4: Price/volume spikes as main trigger, news as confirmation."""
+    from src.screening.screener import scan_for_active_smallcaps, scan_price_volume_spikes
+    from src.universe.builder import get_universe
     from src.scraping.scraper import scrape_all_sources
     from src.analysis.pipeline import analyze_with_screener
     from src.config import validate_api_keys
@@ -128,14 +135,29 @@ async def run_screener_pipeline(use_cache: bool = True, max_signals: int = 5) ->
         print("\n❌ No Groq API key found! Run setup_credentials.py first")
         return []
 
-    # Step 1: Screen for active small-caps
-    print("\n🔍 Step 1: Screening for active small-caps...")
-    candidates = scan_for_active_smallcaps(max_results=20)
-    print(f"   Found {len(candidates)} screener candidates")
+    # Step 1a: Check for price/volume spikes (Problem 4: primary trigger)
+    print("\n🔍 Step 1: Scanning for price/volume spikes...")
+    universe = get_universe()
+    universe_tickers = list(universe.keys())
+    spike_candidates = scan_price_volume_spikes(universe_tickers, max_results=15)
+    print(f"   Found {len(spike_candidates)} stocks with unusual activity")
 
-    if candidates:
+    # Step 1b: Also scan NSE gainers / Screener.in / Trendlyne
+    print("\n🔍 Step 1b: Screening NSE/Screener/Trendlyne...")
+    screener_candidates = scan_for_active_smallcaps(max_results=20)
+    print(f"   Found {len(screener_candidates)} screener candidates")
+
+    # Combine candidates (spikes take priority)
+    all_candidates = []
+    seen_tickers = set()
+    for c in spike_candidates + screener_candidates:
+        if c.ticker not in seen_tickers:
+            seen_tickers.add(c.ticker)
+            all_candidates.append(c)
+
+    if all_candidates:
         print("\n   Top candidates:")
-        for c in candidates[:10]:
+        for c in all_candidates[:10]:
             print(f"   {c.ticker:15s} | ₹{c.price:8.2f} | {c.change_pct:+6.1f}% | {c.reason}")
 
     # Step 2: Scrape news
@@ -149,7 +171,7 @@ async def run_screener_pipeline(use_cache: bool = True, max_signals: int = 5) ->
 
     # Step 3: Match candidates to articles and analyze
     print("\n🧠 Step 3: Analyzing matched articles...")
-    candidate_dicts = [c.to_dict() for c in candidates]
+    candidate_dicts = [c.to_dict() for c in all_candidates]
     signals = analyze_with_screener(candidate_dicts, articles, max_signals=max_signals)
 
     # Send signals to Telegram
@@ -182,26 +204,185 @@ async def run_screener_pipeline(use_cache: bool = True, max_signals: int = 5) ->
         print("   The screener found candidates but no matching news articles.")
         print("   Try running again later or check if news sources are accessible.")
 
+    print_run_stats()  # Problem 10: print per-run usage
     return signals
 
 
+# ── Issue 2: Lightweight intra-day spike scan ─────────────────────────────────
+_SPIKE_QUEUE_PATH = ROOT / "data" / "spike_queue.json"
+
+
+def _load_spike_queue() -> list:
+    try:
+        if _SPIKE_QUEUE_PATH.exists():
+            with open(_SPIKE_QUEUE_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return []
+
+
+def _save_spike_queue(queue: list):
+    _SPIKE_QUEUE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(_SPIKE_QUEUE_PATH, "w", encoding="utf-8") as f:
+        json.dump(queue, f, ensure_ascii=False, indent=2)
+
+
+def _enqueue_spike_tickers(candidates: list):
+    """Add newly-discovered spiking tickers to the queue (deduped)."""
+    queue = _load_spike_queue()
+    seen = {item["ticker"] for item in queue}
+    for c in candidates:
+        if c.ticker not in seen:
+            queue.append(c.to_dict())
+            seen.add(c.ticker)
+    _save_spike_queue(queue)
+
+
+async def run_spike_mini():
+    """Issue 2: Lightweight scan — scrape only queued tickers, mini-analyse, send signals."""
+    from src.screening.screener import scan_price_volume_spikes
+    from src.universe.builder import get_universe
+    from src.scraping.scraper import scrape_all_sources
+    from src.analysis.pipeline import analyze_with_screener
+    from src.config import validate_api_keys
+    from src.ai.providers import reset_run_stats, print_run_stats
+
+    keys = validate_api_keys()
+    if not keys.get("groq"):
+        return
+
+    reset_run_stats()
+
+    # Step 1: scan universe for new spikes and enqueue
+    universe = get_universe()
+    spike_candidates = scan_price_volume_spikes(list(universe.keys()), max_results=10)
+    if spike_candidates:
+        _enqueue_spike_tickers(spike_candidates)
+        print(f"   Enqueued {len(spike_candidates)} new spike tickers")
+
+    # Step 2: load queue and scrape news
+    queue = _load_spike_queue()
+    if not queue:
+        print("   Spike queue empty, skipping")
+        return
+
+    articles = scrape_all_sources(use_cache=True)
+    if not articles:
+        print("   No articles found")
+        return
+
+    # Step 3: match queued tickers to articles (lightweight)
+    queue_tickers = {item["ticker"] for item in queue}
+    matched_articles = []
+    for article in articles:
+        text = ""
+        if hasattr(article, 'to_dict'):
+            d = article.to_dict()
+            text = f"{d.get('title', '')} {d.get('content', '')[:1000]}"
+        elif isinstance(article, dict):
+            text = f"{article.get('title', '')} {article.get('content', '')[:1000]}"
+        text_lower = text.lower()
+        for tk in queue_tickers:
+            base = tk.replace(".NS", "").replace(".BO", "").lower()
+            if len(base) >= 4 and base in text_lower:
+                matched_articles.append(article)
+                break
+
+    if not matched_articles:
+        print(f"   No articles matched {len(queue_tickers)} queued tickers")
+        return
+
+    print(f"   Matched {len(matched_articles)} articles for {len(queue_tickers)} queued tickers")
+    candidate_dicts = [item for item in queue]
+    signals = analyze_with_screener(candidate_dicts, matched_articles, max_signals=3)
+
+    if signals:
+        try:
+            from src.portfolio.telegram import send_signal
+            for s in signals:
+                await send_signal(s)
+        except Exception as e:
+            logging.warning(f"Telegram send failed: {e}")
+
+        for s in signals:
+            t = s["trade"]
+            print(f"   ⚡ {t['name']} [{t['ticker']}] — {t['trade_type']} ({t['direction']}) conf={t['confidence']}%")
+
+    # Clean processed tickers from queue
+    signaled_tickers = {s["trade"]["ticker"] for s in signals} if signals else set()
+    remaining = [item for item in queue if item["ticker"] not in signaled_tickers]
+    _save_spike_queue(remaining)
+
+    print_run_stats()
+
+
 def run_scheduler():
-    """Run 2x daily scheduler"""
+    """Run 2x daily scheduler with intra-day spike scanning (Issue 2) and auto-outcome resolution (Problem 11)"""
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.cron import CronTrigger
+    from apscheduler.triggers.interval import IntervalTrigger
+    from src.config import load_settings
 
+    settings = load_settings()
     scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
+    spike_interval = settings.get("schedule", {}).get("spike_scan_interval_minutes", 15)
 
     async def scheduled_run():
         print(f"\n⏰ Scheduled run at {datetime.now().strftime('%H:%M:%S')}")
         await run_pipeline(use_cache=False, max_signals=5)
 
-    # 6:30 AM and 4:30 PM IST
+    async def scheduled_spike_scan():
+        """Issue 2: Lightweight spike scan — find spiking tickers and queue them for mini-analysis."""
+        from datetime import datetime as dt
+        now = dt.now()
+        ist_hour = (now.hour + 5) % 24  # rough IST offset (no pytz needed)
+        ist_minute = now.minute
+        market_open = ist_hour > 9 or (ist_hour == 9 and ist_minute >= 15)
+        market_closed = ist_hour >= 15 and ist_minute >= 30
+
+        if not market_open or market_closed:
+            return  # skip outside market hours
+
+        print(f"\n⚡ Spike scan at {now.strftime('%H:%M:%S')} IST")
+        await run_spike_mini()
+
+    async def scheduled_resolve_outcomes():
+        """Problem 11: Auto-check signal outcomes a few days after generation."""
+        print(f"\n🔄 Auto-resolving signal outcomes at {datetime.now().strftime('%H:%M:%S')}")
+        try:
+            from scripts.backtest import resolve_outcomes
+            result = resolve_outcomes(days=7)
+            print(f"   Resolved: {result.get('resolved', 0)} signals")
+
+            # Re-calibrate after resolving outcomes
+            from src.analysis.calibration import get_calibrator
+            calibrator = get_calibrator()
+            calibrator.calibrate_from_db()
+            print("   Recalibrated confidence from new outcomes")
+        except Exception as e:
+            print(f"   Outcome resolution failed: {e}")
+
+    # 6:30 AM and 4:30 PM IST — main runs
     scheduler.add_job(scheduled_run, CronTrigger(hour=6, minute=30, timezone="Asia/Kolkata"))
     scheduler.add_job(scheduled_run, CronTrigger(hour=16, minute=30, timezone="Asia/Kolkata"))
 
+    # Issue 2: Spike scan every N minutes during market hours (9:15 AM – 3:30 PM IST)
+    scheduler.add_job(
+        scheduled_spike_scan,
+        IntervalTrigger(minutes=spike_interval),
+        id="spike_scan",
+        name=f"Spike scan every {spike_interval} min",
+    )
+
+    # Problem 11: Auto-check outcomes at 9:30 AM IST (after market opens, check previous signals)
+    scheduler.add_job(scheduled_resolve_outcomes, CronTrigger(hour=9, minute=30, timezone="Asia/Kolkata"))
+
     scheduler.start()
-    print("\n⏰ Scheduler started (6:30 AM & 4:30 PM IST)")
+    print("\n⏰ Scheduler started:")
+    print("   Main runs: 6:30 AM & 4:30 PM IST")
+    print(f"   Spike scan: every {spike_interval} min during market hours (9:15 AM – 3:30 PM IST)")
+    print("   Auto-outcome resolution: 9:30 AM IST (Problem 11)")
     print("   Press Ctrl+C to stop\n")
 
     try:
@@ -236,6 +417,22 @@ async def main():
         setup_main()
         return
 
+    # Problem 9 + Issue 3: Personal-use-only guardrail — hard gate when sharing is enabled
+    from src.config import load_settings
+    _settings = load_settings()
+    if not _settings.get("portfolio", {}).get("personal_use_only", True):
+        # Issue 3: require env-var acknowledgement before allowing non-personal mode
+        if not os.environ.get("I_HAVE_REVIEWED_SEBI_REGULATIONS"):
+            print("\n🚫 BLOCKED: personal_use_only is FALSE in settings.yaml")
+            print("   Sharing trade signals publicly requires SEBI Research Analyst registration.")
+            print("   To acknowledge this and continue, set the environment variable:")
+            print("     I_HAVE_REVIEWED_SEBI_REGULATIONS=true")
+            print("   Then re-run the command.")
+            print("   Aborting.\n")
+            sys.exit(1)
+        print("\n⚠️  SEBI ACKNOWLEDGED: personal_use_only is False — running in shared mode")
+        print("   You are responsible for SEBI compliance.\n")
+
     if args.command == "run":
         await run_pipeline(use_cache=args.cache, max_signals=args.signals)
 
@@ -246,10 +443,21 @@ async def main():
         run_scheduler()
 
     elif args.command == "backtest":
+        # Problem 6: Actually run backtest — resolve outcomes first, then show results
         sys.path.insert(0, str(Path(__file__).parent / "scripts"))
         from scripts.backtest import resolve_outcomes, show_results
+
+        print("\n📊 RUNNING BACKTEST...")
+        print("Step 1: Resolving signal outcomes from yfinance...")
         resolve_outcomes(days=30)
-        show_results()
+        print("\nStep 2: Computing backtest metrics...")
+        results = show_results()
+
+        if not results:
+            print("\n💡 No outcomes yet. Run the pipeline a few times to generate signals,")
+            print("   then run backtest again to see results.")
+            print("\n   python main.py run --signals 3   # Generate signals")
+            print("   python main.py backtest           # Check outcomes (after a few days)")
 
     elif args.command == "portfolio":
         from src.portfolio.manager import PortfolioManager
