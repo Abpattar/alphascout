@@ -210,7 +210,7 @@ async def main():
 
     parser = argparse.ArgumentParser(description="AlphaScout - News to Trade Signal Bot")
     parser.add_argument("command", nargs="?", default="run",
-                        choices=["run", "scan", "scheduler", "backtest", "portfolio", "config", "test"],
+                        choices=["run", "scan", "scheduler", "backtest", "portfolio", "config", "test", "db"],
                         help="Command to execute")
     parser.add_argument("--cache", action="store_true", default=True,
                         help="Use cached articles")
@@ -275,6 +275,26 @@ async def main():
                 print(f"   {name}: {stat['calls']} calls, {stat['errors']} errors, {stat['success_rate']}% success")
             else:
                 print(f"   {name}: {stat}")
+
+    elif args.command == "db":
+        from src.storage.db import get_db
+        db = get_db()
+        stats = db.get_stats()
+        print("\n📊 DATABASE STATS:")
+        print(f"   Articles stored:      {stats['articles']}")
+        print(f"   LLM analyses:         {stats['llm_analyses']}")
+        print(f"   Signals generated:    {stats['signals']}")
+        print(f"   Outcomes recorded:    {stats['outcomes']}")
+        print(f"   Wins:                 {stats['wins']}")
+        print(f"   Losses:               {stats['losses']}")
+        print(f"   Win rate:             {stats['win_rate']}%")
+        print(f"\n   DB path: {db.db_path}")
+
+        unresolved = db.get_unresolved_signals(days=14)
+        if unresolved:
+            print(f"\n   ⏳ Unresolved signals (last 14 days): {len(unresolved)}")
+            for s in unresolved[:5]:
+                print(f"      {s['signal_id'][:30]} | {s['ticker']} | conf={s['confidence']}%")
 
 
 if __name__ == "__main__":

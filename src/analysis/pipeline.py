@@ -123,11 +123,38 @@ class AnalysisPipeline:
     def __init__(self):
         self.registry = get_registry()
         self.mapper = get_mapper()
+        self._db = None
+
+    @property
+    def db(self):
+        if self._db is None:
+            try:
+                from src.storage.db import get_db
+                self._db = get_db()
+            except Exception:
+                pass
+        return self._db
+
+    def _log_to_db(self, article_id, stage, provider, output, **kwargs):
+        """Store LLM analysis to DB (non-fatal)."""
+        if self.db and article_id:
+            try:
+                self.db.store_analysis(article_id, stage, provider, output, **kwargs)
+            except Exception as e:
+                logger.debug(f"DB store analysis failed: {e}")
 
     def analyze_article(self, article: Dict) -> Optional[Dict]:
         """Full 4-stage analysis on single article"""
         title = article.get("title", "")[:80]
         logger.info(f"Analyzing: {title}")
+
+        # Store article in DB for traceability
+        article_id = None
+        if self.db:
+            try:
+                article_id = self.db.store_article(article)
+            except Exception:
+                pass
 
         try:
             # Stage 0: Quick filter
@@ -137,6 +164,8 @@ class AnalysisPipeline:
 
             # Stage 1: Triage
             triage = self._triage(article)
+            self._log_to_db(article_id, "triage", "ensemble", triage.__dict__ if triage else {},
+                            signal_type="none")
             if not triage or not triage.has_catalyst:
                 logger.debug(f"REJECTED (no catalyst): {title}")
                 return None
@@ -148,12 +177,16 @@ class AnalysisPipeline:
 
             # Stage 2: Entity Extraction
             entities = self._extract_entities(triage, article)
+            self._log_to_db(article_id, "entity_extraction", "ensemble",
+                            entities.__dict__ if entities else {})
             if not entities or not entities.companies:
                 logger.debug(f"REJECTED (no companies): {title}")
                 return None
 
             # Stage 3: Impact Analysis
             predictions = self._analyze_impact(triage, entities)
+            self._log_to_db(article_id, "impact_analysis", "ensemble",
+                            {"predictions": [p.__dict__ for p in predictions]} if predictions else {})
             if not predictions:
                 logger.debug(f"REJECTED (no impact): {title}")
                 return None
@@ -171,7 +204,16 @@ class AnalysisPipeline:
 
             # Return best trade
             best = max(trades, key=lambda t: t.confidence * t.risk_reward_ratio)
-            return self._format_output(best, triage, article)
+            output = self._format_output(best, triage, article)
+
+            # Store final signal in DB
+            if self.db and output:
+                try:
+                    self.db.store_signal(output, article_id=article_id)
+                except Exception as e:
+                    logger.debug(f"DB store signal failed: {e}")
+
+            return output
 
         except Exception as e:
             logger.error(f"Pipeline error for '{title}': {e}")

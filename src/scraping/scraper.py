@@ -423,6 +423,15 @@ def scrape_all_sources(categories: List[str] = None, use_cache: bool = True) -> 
         except RuntimeError:
             articles = asyncio.run(scraper.enrich_articles(articles, max_enrich=8))
         scraper._save_cache(articles)
+
+    # Persist to database for backtesting and calibration
+    try:
+        from src.storage.db import get_db
+        db = get_db()
+        db.store_articles_batch([a.to_dict() for a in articles])
+    except Exception as e:
+        logger.debug(f"DB store articles failed (non-fatal): {e}")
+
     return articles
 
 

@@ -1,6 +1,6 @@
 # AlphaScout Session Memory
-**Last Updated:** 2025-07-24 (Session 6)
-**Project Root:** `/home/neo/Codes/alphascout`
+**Last Updated:** 2026-07-26 (Session 7)
+**Project Root:** `D:\Codes\alphascout`
 
 ---
 
@@ -33,7 +33,7 @@ Build "AlphaScout" — a multi-sector small-cap news→trade signal bot that:
 
 ---
 
-## Current Status: PRODUCTION-QUALITY PIPELINE
+## Current Status: PRODUCTION-QUALITY PIPELINE + PERSISTENT STORAGE
 
 ### What Works ✅
 - **Pipeline**: End-to-end (scrape → analyze → signal)
@@ -66,6 +66,15 @@ Build "AlphaScout" — a multi-sector small-cap news→trade signal bot that:
 2. ✅ **Installed `gh` CLI** — Located at `~/.local/bin/gh`, version 2.67.0
 3. ✅ **Configured git credentials** — Token stored in `~/.config/gh/hosts.yml`, credential helper set to `!gh auth git-credential`
 4. ✅ **Initial push** — 24 files, 6480 insertions (excluded venv, .env, credentials, cache files)
+
+### Session 7 Changes — Phase 1: Database & Logging Infrastructure
+1. ✅ **Created `src/storage/db.py`** — SQLite database with 4 tables: `raw_articles`, `llm_analysis`, `signals`, `outcomes`
+2. ✅ **Created `src/storage/__init__.py`** — Package init with `get_db()` singleton
+3. ✅ **Wired scraper → DB** — Every scraped article is now stored in `raw_articles` table
+4. ✅ **Wired pipeline → DB** — Every LLM analysis stage output stored in `llm_analysis` table, final signals in `signals` table
+5. ✅ **Added `db` command to main.py** — `python main.py db` shows database stats (articles, analyses, signals, outcomes, win rate)
+6. ✅ **Thread-safe** — Uses WAL mode and threading.local() for concurrent access
+7. ✅ **Zero-config** — SQLite file auto-created at `data/alphascout.db`, no server needed
 
 ### Production Test Results
 ```
@@ -175,11 +184,17 @@ HINDPETRO.NS, INDUSINDBK.NS
 
 ## How to Use
 ```bash
-cd /home/neo/Codes/alphascout
+cd D:\Codes\alphascout
 source venv/bin/activate
 
 # Run pipeline (sends to Telegram)
 python main.py run --signals 3
+
+# Screener-first mode
+python main.py scan --signals 3
+
+# Check database stats
+python main.py db
 
 # Check universe
 python -c "from src.universe.builder import get_universe; u = get_universe(); print(f'{len(u)} stocks')"
@@ -192,31 +207,36 @@ python -c "from src.ai.providers import ProviderRegistry; reg = ProviderRegistry
 
 ## What to Do Next (Priority Order)
 
-### 1. Test Niche Sources in Production
-Run `python main.py run --no-cache --signals 3` in a real environment to verify:
-- Equitymaster, Trendlyne, ValuePickr RSS feeds work
-- Screener.in and BSE SME HTML scraping works
-- Niche sources actually produce small-cap articles
+### Phase 1: Database & Logging ✅ DONE
+- SQLite storage with 4 tables is live
+- All pipeline stages write to DB
 
-### 2. Fix Niche Sources That Failed
-If any niche sources return 0 articles:
-- Try alternative RSS URLs
-- Switch to HTML scraping with different selectors
-- Check if sites block automated requests
+### Phase 2: Backtesting Harness (Next)
+- Rewrite `scripts/backtest.py` to read from DB
+- Fetch actual price outcomes from yfinance
+- Compute win rate, R-multiple, max drawdown, Sharpe-like ratio
 
-### 3. Groq Rate Limit Issue
-- Groq free tier: 100K tokens/day
-- We hit limit today (~50 articles = ~100K tokens)
-- **Fix**: Use Cerebras/OpenRouter/Gemini more, reduce article count, or get more API keys
+### Phase 3: Confidence Calibration
+- Create `src/analysis/calibration.py`
+- Bucket signals by stated confidence, compare to outcomes
+- Remap to calibrated confidence before auto-execution
 
-### 4. GitHub Actions CI/CD (Optional)
-- Add `.github/workflows/` for automated testing
-- Set up scheduled runs (e.g., daily market scan at 9:30 AM IST)
+### Phase 4: Source Trust Tiers & PR/Pump Filters
+- Add `tier` field to all sources in `config/sources.yaml`
+- Update prompts to flag promotional language and require independent confirmation
 
-### 5. Remaining Features
-- Zerodha integration (needs API keys)
-- Backtesting (need more signals first)
-- Scheduler testing
+### Phase 5: Portfolio Risk Rules
+- Fix `manager.py` bug (`self.mapper`)
+- Add min daily traded value filter, max drawdown kill-switch
+- `PERSONAL_USE_ONLY` flag, hard position sizing limits
+
+### Phase 6: Universe Construction Rules
+- Rule-based inclusion from `config/settings.yaml`
+- Universe change logging
+
+### Phase 7: Auto-Execution Guard
+- `PERSONAL_USE_ONLY = true` flag
+- Paper-trading only until 2-3 months of signals logged
 
 ---
 
@@ -237,6 +257,13 @@ If any niche sources return 0 articles:
 ### Session 6
 - `.gitignore` — Created (excludes venv, .env, data/*.json, __pycache__, credentials)
 - `SESSION_MEMORY.md` — Updated with GitHub setup
+
+### Session 7 — Phase 1 (Database)
+- `src/storage/__init__.py` — **NEW** — Package init
+- `src/storage/db.py` — **NEW** — SQLite storage module (4 tables, CRUD, stats)
+- `src/scraping/scraper.py` — Wired articles to DB storage
+- `src/analysis/pipeline.py` — Wired LLM analyses and signals to DB
+- `main.py` — Added `db` command for database stats
 
 ---
 

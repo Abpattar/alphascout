@@ -9,7 +9,9 @@ credentials.enc
 data/*.json
 data/*.pkl
 data/*.jsonl
+data/*.db
 *.enc
+*.db
 IDE/
 Api.txt
 *.docx
