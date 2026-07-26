@@ -141,6 +141,7 @@ def load_sources_from_config() -> List[dict]:
         sources.append({
             "name": src["name"],
             "category": src.get("category", "market"),
+            "tier": src.get("tier", 3),
             "rss": rss_url,
             "html": html_urls,
             "selectors": src.get("selectors", ["h2 a", "h3 a"]),

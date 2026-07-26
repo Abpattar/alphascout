@@ -10,6 +10,13 @@ AI Prompt Templates for AlphaScout Pipeline
 TRIAGE_SYSTEM = """You are an expert Indian stock market analyst specializing in SMALL/MID CAP companies (<₹5000 Cr market cap).
 Identify if news contains a TRADEABLE CATALYST that will move stock prices in 3-7 days.
 
+IMPORTANT: Flag potential pump-and-dump or corporate PR risks. Watch for:
+- Promotional language ("multibagger", "next 10x", "once in a lifetime")
+- Company's own press release without independent corroboration
+- Timing suspiciously close to a recent price run-up
+- Lack of specific financial details (no ₹ values, no timelines)
+- Generic "expansion plans" or "strategic vision" without concrete orders
+
 RETURN ONLY VALID JSON. No markdown, no explanation."""
 
 TRIAGE_PROMPT = """Analyze this news article for tradeable catalysts:
@@ -45,7 +52,11 @@ Return JSON:
   "named_companies": ["explicit company names mentioned"],
   "implied_companies": ["likely beneficiaries not explicitly named"],
   "catalyst_strength": "STRONG/MODERATE/WEAK",
-  "key_quote": "Most impactful sentence from article (max 200 chars)"
+  "key_quote": "Most impactful sentence from article (max 200 chars)",
+  "pr_pump_risk": "LOW/MEDIUM/HIGH",
+  "pr_pump_flags": ["specific red flags found, e.g. 'promotional language', 'no independent source', 'company PR only'"],
+  "independent_sources_count": 0,
+  "source_tier_note": "Tier 1=govt/regulatory (highest), Tier 2=mainstream, Tier 3=niche, Tier 4=corporate PR (lowest)"
 }}
 
 FILTER OUT:

@@ -91,6 +91,14 @@ Build "AlphaScout" — a multi-sector small-cap news→trade signal bot that:
 5. ✅ **Signal display updated** — Shows both raw and calibrated confidence, with reason for auto-execute decision
 6. ✅ **Minimum data threshold** — Auto-execution blocked until >=5 signals in each confidence bucket
 
+### Session 7 Changes — Phase 4: Source Trust Tiers & PR/Pump Filters
+1. ✅ **Added `tier` field to all 25 sources** — Tier 1: Govt/exchanges (5), Tier 2: Mainstream/market (14), Tier 3: Niche (6)
+2. ✅ **Updated triage prompt** — Now detects promotional language, PR-only sources, suspicious timing, lack of independent corroboration
+3. ✅ **Added `pr_pump_risk`, `pr_pump_flags`, `independent_sources_count` to TriageResult** — LLM now flags pump risk
+4. ✅ **PR/pump filtering in pipeline** — HIGH risk = reject, MEDIUM risk = 20% confidence penalty
+5. ✅ **Source tier wired into scraper** — Articles carry their source tier for downstream use
+6. ✅ **Impact analysis prompt updated** — Considers source tier in confidence assessment
+
 ### Production Test Results
 ```
 #1 RRP Defense [RRPDEFENSE.BO] — STRONG_BUY (LONG)
@@ -300,6 +308,12 @@ python -c "from src.universe.builder import get_universe; u = get_universe(); pr
 - `src/analysis/calibration.py` — **NEW** — ConfidenceCalibrator with 5 buckets
 - `src/analysis/pipeline.py` — `_format_output()` now includes calibrated confidence
 - `main.py` — Added `calibrate` command, updated signal display
+
+### Session 7 — Phase 4 (Source Tiers & PR/Pump)
+- `config/sources.yaml` — Added `tier` field to all 25 sources
+- `src/ai/prompts.py` — Added PR/pump detection to triage prompt
+- `src/analysis/pipeline.py` — Added pr_pump_risk filtering (HIGH=reject, MEDIUM=penalty)
+- `src/scraping/scraper.py` — Source tier now carried in article data
 
 ---
 

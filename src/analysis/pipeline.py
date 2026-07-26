@@ -34,6 +34,10 @@ class TriageResult:
     implied_companies: List[str]
     catalyst_strength: str
     key_quote: str
+    pr_pump_risk: str = "LOW"
+    pr_pump_flags: List[str] = field(default_factory=list)
+    independent_sources_count: int = 0
+    source_tier_note: str = ""
 
 
 @dataclass
@@ -174,6 +178,13 @@ class AnalysisPipeline:
             if triage.catalyst_strength == "WEAK" or triage.time_sensitivity == "LONG":
                 logger.debug(f"REJECTED (weak/long): {title} — strength={triage.catalyst_strength}, time={triage.time_sensitivity}")
                 return None
+
+            # PR/Pump risk filter
+            if triage.pr_pump_risk == "HIGH":
+                logger.warning(f"REJECTED (high PR/pump risk): {title} — flags: {triage.pr_pump_flags}")
+                return None
+            if triage.pr_pump_risk == "MEDIUM":
+                logger.info(f"Note: {title} — medium PR/pump risk, will reduce confidence")
 
             # Stage 2: Entity Extraction
             entities = self._extract_entities(triage, article)
@@ -349,6 +360,9 @@ class AnalysisPipeline:
                 # Penalize large-caps in ranking (reduce confidence by 15%)
                 if is_large_cap:
                     pred_obj.confidence = max(60, int(pred_obj.confidence * 0.85))
+                # Penalize medium PR/pump risk (reduce confidence by 20%)
+                if triage.pr_pump_risk == "MEDIUM":
+                    pred_obj.confidence = max(55, int(pred_obj.confidence * 0.80))
                 predictions.append(pred_obj)
             except Exception as e:
                 logger.warning(f"Failed to create ImpactPrediction for {ticker}: {e}")

@@ -3,6 +3,7 @@
 
 sources:
   # MAINSTREAM (8) - RSS + HTML fallback
+  # Tier 2: Mainstream financial press — reliable but can carry PR
   - name: "times_of_india"
     type: "rss_html"
     rss_url: "https://timesofindia.indiatimes.com/rssfeeds/1081479906.cms"
@@ -14,6 +15,7 @@ sources:
     base_url: "https://timesofindia.indiatimes.com"
     enabled: true
     category: "mainstream"
+    tier: 2
     rate_limit: 10
 
   - name: "the_print"
@@ -27,6 +29,7 @@ sources:
     base_url: "https://theprint.in"
     enabled: true
     category: "mainstream"
+    tier: 2
     rate_limit: 10
 
   - name: "news18"
@@ -39,6 +42,7 @@ sources:
     base_url: "https://www.news18.com"
     enabled: true
     category: "mainstream"
+    tier: 2
     rate_limit: 10
 
   - name: "indian_express"
@@ -52,6 +56,7 @@ sources:
     base_url: "https://indianexpress.com"
     enabled: true
     category: "mainstream"
+    tier: 2
     rate_limit: 10
 
   - name: "financial_express"
@@ -65,6 +70,7 @@ sources:
     base_url: "https://www.financialexpress.com"
     enabled: true
     category: "mainstream"
+    tier: 2
     rate_limit: 10
 
   - name: "business_standard"
@@ -77,6 +83,7 @@ sources:
     base_url: "https://www.business-standard.com"
     enabled: true
     category: "mainstream"
+    tier: 2
     rate_limit: 5
     note: "Aggressive blocking - RSS preferred"
 
@@ -85,6 +92,7 @@ sources:
     rss_url: "https://feeds.feedburner.com/ndtvnews-india-news"
     enabled: true
     category: "mainstream"
+    tier: 2
     rate_limit: 10
     note: "Blocks scraping - RSS only"
 
@@ -99,9 +107,11 @@ sources:
     base_url: "https://economictimes.indiatimes.com"
     enabled: true
     category: "mainstream"
+    tier: 2
     rate_limit: 10
 
   # GOVERNMENT / OFFICIAL (3) - Highest signal quality
+  # Tier 1: Government/regulatory filings — highest trust
   - name: "pib_defence"
     type: "rss_html"
     rss_url: "https://pib.gov.in/RssMain.aspx?ModId=6"
@@ -111,6 +121,7 @@ sources:
     base_url: "https://pib.gov.in"
     enabled: true
     category: "government"
+    tier: 1
     rate_limit: 20
     priority: "high"
 
@@ -123,6 +134,7 @@ sources:
     base_url: "https://pib.gov.in"
     enabled: true
     category: "government"
+    tier: 1
     rate_limit: 20
     priority: "high"
 
@@ -135,10 +147,12 @@ sources:
     base_url: "https://www.drdo.gov.in"
     enabled: true
     category: "government"
+    tier: 1
     rate_limit: 15
     priority: "high"
 
-  # MARKET-SPECIFIC (4) - Direct market moving news
+  # MARKET-SPECIFIC (6) - Direct market moving news
+  # Tier 2: Market-specific press — good signal but check for PR
   - name: "moneycontrol_markets"
     type: "rss_html"
     rss_url: "https://www.moneycontrol.com/rss/marketnews.xml"
@@ -150,6 +164,7 @@ sources:
     base_url: "https://www.moneycontrol.com"
     enabled: true
     category: "market"
+    tier: 2
     rate_limit: 15
 
   - name: "moneycontrol_results"
@@ -161,6 +176,7 @@ sources:
     base_url: "https://www.moneycontrol.com"
     enabled: true
     category: "market"
+    tier: 2
     rate_limit: 10
     note: "Results season - catches small-cap earnings"
 
@@ -174,6 +190,7 @@ sources:
     base_url: "https://economictimes.indiatimes.com"
     enabled: true
     category: "market"
+    tier: 2
     rate_limit: 15
 
   - name: "bs_markets"
@@ -185,6 +202,7 @@ sources:
     base_url: "https://www.business-standard.com"
     enabled: true
     category: "market"
+    tier: 2
     rate_limit: 10
 
   - name: "mint_markets"
@@ -197,6 +215,7 @@ sources:
     base_url: "https://www.livemint.com"
     enabled: true
     category: "market"
+    tier: 2
     rate_limit: 15
 
   - name: "tickertape_blog"
@@ -209,10 +228,12 @@ sources:
     base_url: "https://www.tickertape.in"
     enabled: true
     category: "market"
+    tier: 2
     rate_limit: 10
     note: "Small-cap analysis and stock reports"
 
   # NICHE SMALL-CAP SOURCES (6) - High signal for small/mid caps
+  # Tier 3: Niche small-cap sites — useful but higher PR/pump risk
   - name: "equitymaster"
     type: "rss_html"
     rss_url: "https://equitymaster.com/rss.xml"
@@ -223,6 +244,7 @@ sources:
     base_url: "https://equitymaster.com"
     enabled: true
     category: "niche"
+    tier: 3
     rate_limit: 10
     note: "Value investing, small-cap research"
 
@@ -236,6 +258,7 @@ sources:
     base_url: "https://www.valueresearchonline.com"
     enabled: true
     category: "niche"
+    tier: 3
     rate_limit: 10
     note: "Mutual fund/stock analysis, covers small-caps"
 
@@ -248,6 +271,7 @@ sources:
     base_url: "https://www.screener.in"
     enabled: true
     category: "niche"
+    tier: 3
     rate_limit: 10
     note: "Stock screener - small-cap discovery"
 
@@ -261,6 +285,7 @@ sources:
     base_url: "https://trendlyne.com"
     enabled: true
     category: "niche"
+    tier: 3
     rate_limit: 10
     note: "Market analysis, mid/small-cap coverage"
 
@@ -273,6 +298,7 @@ sources:
     base_url: "https://www.valuepickr.com"
     enabled: true
     category: "niche"
+    tier: 3
     rate_limit: 10
     note: "Community small-cap discussions"
 
@@ -285,15 +311,18 @@ sources:
     base_url: "https://www.bseindia.com"
     enabled: true
     category: "niche"
+    tier: 3
     rate_limit: 15
     note: "BSE SME/small-cap gainers/losers"
 
   # CORPORATE ACTIONS (2) - Direct from exchanges
+  # Tier 1 for exchanges, Tier 4 for corporate PR
   - name: "nse_corporate_announcements"
     type: "api"
     api_url: "https://www.nseindia.com/api/corporate-announcements?index=equities"
     enabled: true
     category: "corporate"
+    tier: 1
     rate_limit: 30
     priority: "high"
     note: "Requires nsepython or direct API with headers"
@@ -307,6 +336,7 @@ sources:
     base_url: "https://www.bseindia.com"
     enabled: true
     category: "corporate"
+    tier: 1
     rate_limit: 15
     priority: "high"
 
