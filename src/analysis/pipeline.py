@@ -426,8 +426,21 @@ class AnalysisPipeline:
             return None
 
     def _format_output(self, trade: TradePlan, triage: TriageResult, article: Dict) -> Dict:
-        """Format final output"""
+        """Format final output with calibrated confidence"""
         stock = self.mapper.universe.get(trade.ticker)
+
+        # Get calibrated confidence
+        try:
+            from src.analysis.calibration import get_calibrator
+            calibrator = get_calibrator()
+            raw_conf = trade.confidence
+            calibrated_conf = calibrator.get_calibrated(raw_conf)
+            should_auto, auto_reason = calibrator.should_auto_execute(raw_conf)[:2]
+        except Exception:
+            calibrated_conf = trade.confidence
+            should_auto = trade.confidence >= 90
+            auto_reason = "raw confidence threshold"
+
         return {
             "signal_id": f"{trade.ticker}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
             "timestamp": datetime.now().isoformat(),
@@ -452,6 +465,9 @@ class AnalysisPipeline:
                 "price": stock.price if stock else 0,
             },
             "trade": asdict(trade),
+            "calibrated_confidence": calibrated_conf,
+            "auto_execute": should_auto,
+            "auto_execute_reason": auto_reason,
             "ensemble_agreement": trade.__dict__.get("ensemble_agreement", False)
         }
 

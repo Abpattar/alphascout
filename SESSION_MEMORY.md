@@ -83,6 +83,14 @@ Build "AlphaScout" — a multi-sector small-cap news→trade signal bot that:
 4. ✅ **`results` action** — Computes win rate, avg R-multiple, profit factor, max drawdown, expectancy, and confidence calibration buckets
 5. ✅ **Updated `main.py` backtest command** — Now runs resolve + show results automatically
 
+### Session 7 Changes — Phase 3: Confidence Calibration
+1. ✅ **Created `src/analysis/calibration.py`** — ConfidenceCalibrator maps raw LLM confidence to calibrated confidence using historical outcomes
+2. ✅ **5 confidence buckets** — 60-69, 70-79, 80-89, 90-95, 96-100 — each tracks actual win rate
+3. ✅ **Pipeline integration** — `_format_output()` now includes `calibrated_confidence` and `auto_execute` flag
+4. ✅ **Added `calibrate` command** — `python main.py calibrate` rebuilds calibration from stored outcomes
+5. ✅ **Signal display updated** — Shows both raw and calibrated confidence, with reason for auto-execute decision
+6. ✅ **Minimum data threshold** — Auto-execution blocked until >=5 signals in each confidence bucket
+
 ### Production Test Results
 ```
 #1 RRP Defense [RRPDEFENSE.BO] — STRONG_BUY (LONG)
@@ -203,6 +211,9 @@ python main.py scan --signals 3
 # Check database stats
 python main.py db
 
+# Calibrate confidence from stored outcomes
+python main.py calibrate
+
 # Backtest: fetch outcomes + show results
 python main.py backtest
 
@@ -284,6 +295,11 @@ python -c "from src.universe.builder import get_universe; u = get_universe(); pr
 ### Session 7 — Phase 2 (Backtesting)
 - `scripts/backtest.py` — **Rewritten** — Full backtest harness (resolve/replay/results)
 - `main.py` — Updated backtest command to use new module
+
+### Session 7 — Phase 3 (Calibration)
+- `src/analysis/calibration.py` — **NEW** — ConfidenceCalibrator with 5 buckets
+- `src/analysis/pipeline.py` — `_format_output()` now includes calibrated confidence
+- `main.py` — Added `calibrate` command, updated signal display
 
 ---
 

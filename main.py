@@ -93,13 +93,16 @@ async def run_pipeline(use_cache: bool = True, max_signals: int = 5) -> list:
         print("=" * 80)
         for i, s in enumerate(signals, 1):
             t = s["trade"]
+            cal_conf = s.get("calibrated_confidence", t['confidence'])
+            auto_exec = s.get("auto_execute", t['confidence'] >= 90)
             print(f"\n#{i} {t['name']} [{t['ticker']}] — {t['trade_type']} ({t['direction']})")
             print(f"   📰 {s['article']['title'][:80]}")
             print(f"   🎯 Target: +{t['target_pct']}% | Stop: -{t['stop_loss_pct']}% | R:R {t['risk_reward_ratio']:.1f}x")
             print(f"   💰 Entry: {t['entry_strategy']}")
-            print(f"   📊 Confidence: {t['confidence']}% | Hold: {t['hold_days']} days")
+            print(f"   📊 Confidence: {t['confidence']}% (calibrated: {cal_conf:.0f}%) | Hold: {t['hold_days']} days")
             print(f"   🧠 Ensemble: {'YES' if s.get('ensemble_agreement') else 'NO'}")
-            print(f"   ⚡ Auto-Execute: {'YES' if t['confidence'] >= 90 else 'NO (manual review)'}")
+            print(f"   ⚡ Auto-Execute: {'YES' if auto_exec else 'NO (manual review)'}")
+            print(f"   ℹ️  {s.get('auto_execute_reason', '')}")
     else:
         print("\n⚠️  No qualifying signals found today")
 
@@ -164,13 +167,16 @@ async def run_screener_pipeline(use_cache: bool = True, max_signals: int = 5) ->
         print("=" * 80)
         for i, s in enumerate(signals, 1):
             t = s["trade"]
+            cal_conf = s.get("calibrated_confidence", t['confidence'])
+            auto_exec = s.get("auto_execute", t['confidence'] >= 90)
             print(f"\n#{i} {t['name']} [{t['ticker']}] — {t['trade_type']} ({t['direction']})")
             print(f"   📰 {s['article']['title'][:80]}")
             print(f"   🎯 Target: +{t['target_pct']}% | Stop: -{t['stop_loss_pct']}% | R:R {t['risk_reward_ratio']:.1f}x")
             print(f"   💰 Entry: {t['entry_strategy']}")
-            print(f"   📊 Confidence: {t['confidence']}% | Hold: {t['hold_days']} days")
+            print(f"   📊 Confidence: {t['confidence']}% (calibrated: {cal_conf:.0f}%) | Hold: {t['hold_days']} days")
             print(f"   🧠 Ensemble: {'YES' if s.get('ensemble_agreement') else 'NO'}")
-            print(f"   ⚡ Auto-Execute: {'YES' if t['confidence'] >= 90 else 'NO (manual review)'}")
+            print(f"   ⚡ Auto-Execute: {'YES' if auto_exec else 'NO (manual review)'}")
+            print(f"   ℹ️  {s.get('auto_execute_reason', '')}")
     else:
         print("\n⚠️  No qualifying signals found")
         print("   The screener found candidates but no matching news articles.")
@@ -210,7 +216,7 @@ async def main():
 
     parser = argparse.ArgumentParser(description="AlphaScout - News to Trade Signal Bot")
     parser.add_argument("command", nargs="?", default="run",
-                        choices=["run", "scan", "scheduler", "backtest", "portfolio", "config", "test", "db"],
+                        choices=["run", "scan", "scheduler", "backtest", "portfolio", "config", "test", "db", "calibrate"],
                         help="Command to execute")
     parser.add_argument("--cache", action="store_true", default=True,
                         help="Use cached articles")
@@ -296,6 +302,13 @@ async def main():
             print(f"\n   ⏳ Unresolved signals (last 14 days): {len(unresolved)}")
             for s in unresolved[:5]:
                 print(f"      {s['signal_id'][:30]} | {s['ticker']} | conf={s['confidence']}%")
+
+    elif args.command == "calibrate":
+        from src.analysis.calibration import get_calibrator
+        calibrator = get_calibrator()
+        print("\n🔄 Recalibrating from stored outcomes...")
+        calibrator.calibrate_from_db()
+        print(calibrator.get_calibration_report())
 
 
 if __name__ == "__main__":
