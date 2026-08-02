@@ -147,6 +147,76 @@ TICKER_ALIASES = {
     # New additions - Manufacturing
     "jtekt india limited": "JTEKTINDIA.NS",
     "tarsons products limited": "TARSONS.NS",
+
+    # Defence
+    "bel": "BEL.NS",
+    "bharat electronics": "BEL.NS",
+    "hal": "HAL.NS",
+    "hindustan aeronautics": "HAL.NS",
+    "bharat dynamics": "BDL.NS",
+    "bdl": "BDL.NS",
+    "ordnance factory": "OFB.NS",
+    "ofb": "OFB.NS",
+    "advanced weapons": "AWEIL.NS",
+    "reliance defence": "RDLS.NS",
+    "tata advanced systems": "TASL.NS",
+    "larsen toubro defence": "LT.NS",
+    "boeing india": "BOEING.NS",
+    "merlinhawk aerospace": "MERLINHAWK.NS",
+    "godrej aerospace": "GODREJPROP.NS",
+    "jnk india": "JNKINDIA.NS",
+    "jnk": "JNKINDIA.NS",
+
+    # Large-cap names that appear in news
+    "indus towers": "INDUSTOWER.NS",
+    "ntpc": "NTPC.NS",
+    "ncc": "NCC.NS",
+    "ircon": "IRCON.NS",
+    "railtel": "RAILTEL.NS",
+    "sadbhav": "SADBHAV.NS",
+
+    # More manufacturing
+    "dixon technologies": "DIXON.NS",
+    "kaynes technology": "KAYNES.NS",
+    "netweb technologies": "NETWEB.NS",
+    "syrma sgs": "SYRMA.NS",
+
+    # More renewables
+    "waaree energies": "WAAREE.NS",
+    "suzlon energy": "SUZLON.NS",
+    "inox wind": "INOXWIND.NS",
+    "olectra greentech": "OLECTRA.NS",
+
+    # More EV
+    "jbm auto": "JBMA.NS",
+    "exide industries": "EXIDEIND.NS",
+    "amara raja": "AMARAJABAT.NS",
+
+    # More chemicals
+    "navin fluorine": "NAVINFLUOR.NS",
+    "gujarat fluorocem": "GUJFLUORO.NS",
+    "deepak nitrite": "DEEPAKNTR.NS",
+    "vinati organics": "VINATIORGA.NS",
+
+    # More infra
+    "kec international": "KEC.NS",
+    "kalpataru power": "KALPATARU.NS",
+    "pnc infratech": "PNCINFRA.NS",
+    "hg infra engineering": "HGINFRA.NS",
+    "dilip buildcon": "DBL.NS",
+    "ashoka buildcon": "ASHOKA.NS",
+
+    # More pharma
+    "dr reddy": "DRREDDY.NS",
+    "cipla": "CIPLA.NS",
+    "laurus labs": "LAURUS.NS",
+    "granules india": "GRANULES.NS",
+
+    # More IT
+    "persistent systems": "PERSISTENT.NS",
+    "cyient": "CYIENT.NS",
+    "coforge": "COFORGE.NS",
+    "birlasoft": "BSOFT.NS",
 }
 
 

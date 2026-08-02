@@ -116,6 +116,15 @@ task_routing:
     max_tokens: 300
     temperature: 0.05
 
+  research:
+    primary: "groq:llama-3.3-70b-versatile"
+    fallback:
+      - "cerebras:gpt-oss-120b"
+      - "gemini:gemini-2.0-flash"
+      - "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"
+    max_tokens: 700
+    temperature: 0.1
+
 # Ensemble settings
 ensemble:
   min_agreeing_models: 2

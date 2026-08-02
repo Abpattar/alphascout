@@ -15,17 +15,19 @@ schedule:
 # UNIVERSE FILTERS
 # ─────────────────────────────────────────────────────────────────────────────
 universe:
-  price_min: 50
-  price_max: 500
-  market_cap_min_cr: 100
-  market_cap_max_cr: 5000
-  min_avg_daily_volume_lakh: 50
-  min_avg_daily_value_cr: 1.0
-  min_listing_age_days: 180
+  price_min: 20
+  price_max: 1000
+  market_cap_min_cr: 50
+  market_cap_max_cr: 50000
+  min_avg_daily_volume_lakh: 10
+  min_avg_daily_value_cr: 0.5
+  min_listing_age_days: 90
   refresh_days: 7
   log_changes: true
   exclude_sebi_asm: true
   exclude_sebi_gsm: true
+  auto_add_from_news: true
+  max_dynamic_additions_per_run: 10
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SIGNAL QUALITY GATES
@@ -111,6 +113,17 @@ llm_budget:
   per_run_call_budget: 80      # max LLM calls per single pipeline run
 
 # ─────────────────────────────────────────────────────────────────────────────
+# WEB RESEARCH (company-less catalyst news)
+# When news has money + a decision but no named company, the pipeline searches
+# recent news to narrow down the specific beneficiary companies.
+# ─────────────────────────────────────────────────────────────────────────────
+research:
+  enabled: true
+  max_results: 8
+  freshness_days: 7
+  timeout_seconds: 8
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PROMPT TOKEN LIMITS
 # ─────────────────────────────────────────────────────────────────────────────
 tokens:
@@ -118,6 +131,7 @@ tokens:
   entity_extraction: 1000
   impact: 2000
   trade_setup: 2500
+  research: 700
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TECHNICAL ANALYSIS

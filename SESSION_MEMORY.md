@@ -1,6 +1,83 @@
 # AlphaScout Session Memory
-**Last Updated:** 2026-07-26 (Session 7)
+**Last Updated:** 2026-08-02 (Session 9)
 **Project Root:** `D:\Codes\alphascout`
+
+---
+
+## Session 9 (2026-08-02) — Company-less Catalyst News → Research-Based Beneficiary Discovery
+
+### What we did
+1. ✅ **Handled "company-less" catalyst news** (e.g., "₹12cr missile order", "Rs 50,000 cr defence export target") — articles with money + decision but NO named company. Previously killed by the pre-filter.
+   - Check 5 pre-filter (`pipeline.py` `_MONEY_RE` + `_has_decision_keyword`): passes money+decision generic articles into triage (stats `generic_money_decision`).
+   - **Stage 1.5 research** (`_research_catalyst`): free Google/Bing News RSS via new `src/research/searcher.py` (`research_news()`); no API key. Short keyword queries (`_key_tokens`, max 5 tokens) — long sentences return 0 results.
+   - Entity extraction now sees `KNOWN_SECTOR_COMPANIES` (candidates from sector map, `_build_sector_candidates`) + research findings; `ENTITY_PROMPT` extended.
+   - **Implied beneficiary**: when no company is named, the chosen company is flagged `implied_beneficiary=True`, confidence ×0.85 (floor 55), printed as "🔎 Implied beneficiary: company NOT named in news (inferred via research)". Research may surface NEW companies not in the universe; only NSE/BSE-tradeable ones pass on-the-fly validation.
+   - New config: `config/settings.yaml` → `research:` (enabled, max_results 8, freshness 7d, timeout 8s), `tokens.research: 700`; `config/providers.yaml` → `research` task route (groq llama-3.3-70b, max_tokens 700, temp 0.1); `src/config.py::get_research_config()`.
+
+2. ✅ **Fixed LLM name/ticker confusion** (3 bugs over 3 full runs):
+   - Run 1: "Zen Technologies Ltd" resolved to Zensar (ZENSARTECH.BO) → added `_name_matches` token guard in `src/universe/builder.py::_search_ticker_by_name`.
+   - Run 2: "Zen Tech [WAAREE.BO]" (Waaree Technologies = solar/glass) slipped through → guard added in `_analyze_impact`.
+   - Runs 2/3: the guard's remap branch **blindly trusted `resolve_ticker`**, which fuzzy-matches "MTAR Technologies" → TATATECH.NS and "Zen Technologies Limited" → WAAREE.BO (shared "Technologies Limited") → it "remapped" to the SAME wrong ticker. **Fix**: new `_reconcile_name_ticker()` helper — a ticker is accepted only if the pred name matches the stock name OR the ticker base (with `_norm_name` normalization: ltd→limited, punctuation); an alternate is tried only if ITS name/base matches too; else DISCARDED. Unit-tested (11 cases) + verified end-to-end in run 3.
+   - Also fixed a main.py `for-else` misprint ("No qualifying signals found today" printed even when signals existed).
+
+3. ✅ **3 full runs** (each ~11–13 min, 40–72 LLM calls, 38–128k est tokens): pipeline works end-to-end; the daily LLM budget (300 calls / 120k tokens, persisted in `data/daily_llm_stats.json`) resets per-day (deleting the file resets it manually).
+4. ✅ **Signal output shows what a found company is related to**: signal dict now includes `stock.sector_display` (readable label, prefers catalyst `product_category` via `_CATEGORY_TO_SECTOR`, falls back to stock sector), top-level `relation` (from impact pred `reasoning` — the specific link, e.g. "provides hardware for missile systems..."), and `stock.newly_added` (ticker not in base universe → on-the-fly added). `main.py` prints a "🏭 Sector: ... | ..." line + "🆕 Newly discovered company" marker. TradePlan gained a `relation` field; pipeline tracks `_base_universe` in `__init__`. Note: impact prompt field `catalyst_to_relevity` (LLM fills it with HQ city) is aliased to `catalyst_to_revenue` — misleading but unused downstream.
+
+### Current state
+- Universe 58 stocks (cached). Dynamic additions OK (e.g., APOLLO.BO → APOLLO.NS). Defence small-caps (ZENTEC, ASTRAMICRO, PARASDEF, DATAPATTNS, MAZDOCK, BRAHMOS) mostly fail Yahoo validation → genuinely untradeable, correctly discarded.
+- Run 3 output: Apollo Micro [APOLLO.NS], Dev IT [DEVIT.NS], ideaForge [IDEAFORGE.NS] — all WATCH, implied beneficiary, calibrated 50–55%, no auto-execute.
+
+### Caveat
+- Implied-beneficiary signals are speculative (e.g., ideaForge inferred from a BrahMos-missiles article); they are flagged + confidence-penalized, but the LLM inference can be a stretch. Research narrows the company but does not guarantee it actually benefits.
+
+### Suggested next steps (continue here)
+1. Commit/push Session 8+9 changes (ask user first — still uncommitted).
+2. Let signals accumulate to measure real accuracy (DB still has 0 resolved outcomes).
+3. Wire Session-8 backtest winners (price-only spikes, defence/railways) into the live screener.
+
+---
+
+## Session 8 (2026-08-01) — Universe Expansion + Historical Accuracy Backtest
+
+### What we did
+1. ✅ **Expanded the universe 45 → 58 stocks** (`src/universe/builder.py`):
+   - `build()` now merges candidates from Screener.in + sector reference tickers + **NSE/BSE lookup JSON + `TICKER_ALIASES`** (new `_get_lookup_tickers()` method).
+   - Widened Screener.in queries to match loosened filters (price 20–1000, cap 50–50k Cr).
+   - **Important**: Screener.in custom screens now require LOGIN → `_discover_from_screener()` returns 0 rows. Discovery relies on lookup/sector pool only.
+   - ~50% of lookup tickers (newly-listed small-caps like WAAREE, TASL, PARASDEF, APOLLOMICRO, TEXMACO, VRL) have **NO Yahoo data** (verified: both `info` and `history` return nothing) → they can never be validated/added. Genuine data-source limitation.
+   - Filters loosened earlier in `config/settings.yaml`: price 20–1000, cap 50–50,000Cr, vol 10L, value 0.5Cr, age 90d.
+
+2. ✅ **Built `scripts/historical_backtest.py`** — replays the spike-scan trigger (`screener.py:scan_price_volume_spikes`) over 2–3 years of daily OHLCV across the universe. Entry = next-day open, stop-first exits, cooldown. 17 parameter configs, breakdowns by sector / spike-type / cap bucket / year. Results → `data/historical_backtest.json`. Price data cached in `data/price_history/`.
+
+### KEY FINDING — the mechanical spike trigger alone is NOT profitable
+- **~57,000 simulated trades**, 17 configs, 2y + 3y runs (consistent):
+  - Closed-trade win rate: 23–36% (median ~29%); breakeven at 2:1 RR needs ~33%
+  - Expectancy: −0.07R to +0.04R (median −0.02R); only 4/17 configs marginally +EV
+  - Profit factor < 1 everywhere (0.5–0.94)
+- Sub-edges that survive (worth wiring into pipeline as filters):
+  - **Price-only spikes** (drop volume-only): +0.02–0.06R, PF ~0.87–0.94
+  - **Defence/Railways/Manufacturing sectors**: +0.04R, PF 0.94 (config `defence_railways`)
+  - Volume-only spikes worst (−0.13R). Edge decayed over time (2023 +0.07R → 2025 −0.06R).
+- Optimistic vs conservative exit convention changes nothing → result is robust.
+
+### Caveat to remember
+The price backtest measures ONLY the mechanical screen. The live bot's news + LLM confirmation layer is NOT covered. Real accuracy can only be measured via resolved outcomes (`python main.py backtest`) — **DB still has 0 outcomes** (18 articles, 4 signals). This is the honest gap.
+
+### Current uncommitted work-in-progress
+Working tree has uncommitted changes (pre-session) across:
+`config/nse_bse_tickers.json`, `config/sectors.yaml`, `config/settings.yaml`, `src/analysis/pipeline.py`, `src/universe/builder.py`, `src/universe/ticker_map.py`
+(plus this session's new `scripts/historical_backtest.py` + `data/historical_backtest.json`).
+NOT committed/pushed. Ask user before committing.
+
+### Questions user asked (answered, may want follow-up)
+- "Will a news company not in the universe be rejected?" → No, if real + tradable: on-the-fly validation (known map → yfinance NS/BO → name search → NSE/BSE lookup) adds it live. Rejected only if no Yahoo data OR fails safety filter (pipeline.py:378-415).
+- "What is the universe used for?" → Watchlist for spike-scanning, article→ticker matching pool, price/sector source for signals. Not a hard gate (dynamic additions allowed).
+
+### Suggested next steps (continue here)
+1. Wire the winning filters into the live pipeline (price-only spikes, defence/railways sectors).
+2. Optionally fix Screener.in discovery (login-based scraping or API).
+3. Accumulate real outcomes to measure the LLM/news layer accuracy.
+4. Commit/push current changes (ask user first).
 
 ---
 
@@ -17,7 +94,7 @@ Build "AlphaScout" — a multi-sector small-cap news→trade signal bot that:
 ## GitHub Repository
 - **URL**: https://github.com/Abpattar/alphascout
 - **Visibility**: Public
-- **Branch**: master
+- **Branch**: main
 - **Initial commit**: 24 files, 6480 insertions
 - **GitHub User**: Abpattar
 
@@ -292,6 +369,14 @@ python -c "from src.universe.builder import get_universe; u = get_universe(); pr
 ---
 
 ## Key Files Modified
+
+### Session 9 — Company-less catalysts + research + name/ticker guard
+- `src/research/searcher.py`, `src/research/__init__.py` — **NEW** — `research_news()` via Google/Bing News RSS (no API key)
+- `src/ai/prompts.py` — RESEARCH system/prompt, `build_research_prompt()`, `format_research_results()`; QUICK_FILTER + TRIAGE accept company-less money+decision news; ENTITY_PROMPT gains candidates + research grounding
+- `src/analysis/pipeline.py` — Check 5 pre-filter, `_research_catalyst()` (Stage 1.5), `_build_sector_candidates()`, `_key_tokens()`/`_build_research_query()`, `_is_implied_beneficiary()`, `implied_beneficiary` fields, `_reconcile_name_ticker()` + `_norm_name()` (name/ticker guard), `_MONEY_RE`/`_DECISION_KEYWORDS`
+- `src/universe/builder.py` — `_name_matches`/`_name_tokens`/`_NAME_STOP_TOKENS` guard in `_search_ticker_by_name`
+- `src/config.py` — `get_research_config()`; `config/settings.yaml` — `research:` block + `tokens.research`; `config/providers.yaml` — `research` task route
+- `main.py` — "🔎 Implied beneficiary" print (run + screener), "🏭 Sector | relation" + "🆕 Newly discovered" prints, fixed `for-else` no-signals misprint
 
 ### Session 3
 - `src/ai/providers.py` — Added dotenv loading at import

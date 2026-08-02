@@ -26,6 +26,7 @@ UNIVERSE_CACHE = DATA_DIR / "universe_cache.json"
 UNIVERSE_TTL_DAYS = 7
 UNIVERSE_CHANGE_LOG = DATA_DIR / "universe_changes.jsonl"
 FULL_NSE_CACHE = DATA_DIR / "full_nse_stocks.json"
+DYNAMIC_STOCKS_FILE = DATA_DIR / "dynamic_stocks.json"
 
 
 @dataclass
@@ -131,9 +132,14 @@ class UniverseBuilder:
         self.sector_tickers = get_all_sector_tickers()
 
     def build(self, force_refresh: bool = False) -> Dict[str, Stock]:
-        """Build universe: Screener.in first, then validate, then tag sectors."""
+        """Build universe: Screener.in first, then validate, then tag sectors, then merge dynamic."""
         if not force_refresh and self._load_cache():
-            logger.info(f"Loaded {len(self.universe)} stocks from cache")
+            # Merge dynamic stocks into cached universe
+            dynamic = self._load_dynamic_stocks()
+            for k, v in dynamic.items():
+                if k not in self.universe:
+                    self.universe[k] = v
+            logger.info(f"Loaded {len(self.universe)} stocks from cache + {len(dynamic)} dynamic")
             return self.universe
 
         logger.info("Building universe from scratch (Screener.in → yfinance → sector tagging)...")
@@ -142,10 +148,14 @@ class UniverseBuilder:
         screener_tickers = self._discover_from_screener()
         logger.info(f"Screener.in discovered {len(screener_tickers)} tickers")
 
-        # 2. Add known sector tickers for tagging reference (NOT as a gate)
+        # 2. Add known sector tickers + NSE/BSE lookup/alias tickers (NOT as a gate)
         sector_ref_tickers = self._get_sector_reference_tickers()
-        all_candidates = screener_tickers | sector_ref_tickers
-        logger.info(f"Total candidates: {len(all_candidates)} (screener + sector ref)")
+        lookup_tickers = self._get_lookup_tickers()
+        all_candidates = screener_tickers | sector_ref_tickers | lookup_tickers
+        logger.info(
+            f"Total candidates: {len(all_candidates)} "
+            f"(screener {len(screener_tickers)} + sector ref {len(sector_ref_tickers)} + lookup {len(lookup_tickers)})"
+        )
 
         # 3. Validate via yfinance (price, market cap, volume)
         validated = self._validate_tickers(all_candidates)
@@ -164,11 +174,17 @@ class UniverseBuilder:
         # 6. Enrich with keywords
         self._enrich_keywords(filtered)
 
-        # 7. Save
+        # 7. Merge any previously discovered dynamic stocks
+        dynamic = self._load_dynamic_stocks()
+        for k, v in dynamic.items():
+            if k not in filtered:
+                filtered[k] = v
+
+        # 8. Save
         self.universe = filtered
         self._save_cache()
 
-        logger.info(f"Universe built: {len(self.universe)} tradeable stocks")
+        logger.info(f"Universe built: {len(self.universe)} tradeable stocks ({len(dynamic)} dynamic)")
         return self.universe
 
     def _get_sector_reference_tickers(self) -> Set[str]:
@@ -183,6 +199,27 @@ class UniverseBuilder:
                     tickers.add(t)
         return tickers
 
+    def _get_lookup_tickers(self) -> Set[str]:
+        """All tickers referenced in the NSE/BSE lookup JSON + ticker aliases.
+        Ensures any company name that appears in news gets validated into the universe."""
+        tickers = set()
+        try:
+            import json
+            from src.universe.ticker_map import TICKER_ALIASES
+
+            path = Path(__file__).parent.parent.parent / "config" / "nse_bse_tickers.json"
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            for v in data.get("lookup", {}).values():
+                if isinstance(v, str) and v:
+                    tickers.add(v)
+            for v in TICKER_ALIASES.values():
+                if isinstance(v, str) and v:
+                    tickers.add(v)
+        except Exception as e:
+            logger.warning(f"Failed to load lookup tickers: {e}")
+        return tickers
+
     def _discover_from_screener(self) -> Set[str]:
         """
         Discover small-cap stocks from Screener.in using fundamental filters.
@@ -190,14 +227,16 @@ class UniverseBuilder:
         """
         discovered = set()
 
-        # Multiple queries to cast a wide net
+        # Multiple queries to cast a wide net (matches loosened universe filters)
         queries = [
-            "marketcap:100to5000+price:50to500",
-            "marketcap:100to5000+volume:>5000000",
-            "price:50to200+marketcap:100to2000",
-            "price:200to500+marketcap:200to5000",
-            "current_ratio:>1.5+price:50to500+marketcap:100to5000",
-            "roe:>+15+price:50to500+marketcap:100to5000",
+            "marketcap:50to50000+price:20to1000",
+            "marketcap:50to50000+volume:>1000000",
+            "price:20to200+marketcap:50to5000",
+            "price:200to1000+marketcap:500to50000",
+            "current_ratio:>1.5+price:20to1000+marketcap:50to50000",
+            "roe:>+15+price:20to1000+marketcap:50to50000",
+            "profit_margin:>+10+price:20to1000+marketcap:50to50000",
+            "debt_to_equity:<1+price:20to1000+marketcap:50to50000",
         ]
 
         for query in queries:
@@ -501,6 +540,46 @@ class UniverseBuilder:
         with open(UNIVERSE_CACHE, "w") as f:
             json.dump(data, f, indent=2)
 
+    def _load_dynamic_stocks(self) -> Dict[str, Stock]:
+        """Load dynamically added stocks (discovered from news, persisted across runs)."""
+        if not DYNAMIC_STOCKS_FILE.exists():
+            return {}
+        try:
+            with open(DYNAMIC_STOCKS_FILE) as f:
+                data = json.load(f)
+            stocks = {}
+            for k, v in data.get("stocks", {}).items():
+                try:
+                    stocks[k] = Stock.from_dict(v)
+                except Exception:
+                    pass
+            logger.info(f"Loaded {len(stocks)} dynamic stocks from news discoveries")
+            return stocks
+        except Exception as e:
+            logger.warning(f"Failed to load dynamic stocks: {e}")
+            return {}
+
+    def _save_dynamic_stocks(self):
+        """Persist dynamically added stocks so they survive across runs."""
+        dynamic = {}
+        for k, v in self.universe.items():
+            if v.last_updated and "dynamic_" in str(v.__dict__.get("source", "")):
+                dynamic[k] = v.to_dict()
+        # Also save any stock that was added via on-the-fly validation
+        if not dynamic:
+            # Save all stocks that weren't from the original screener build
+            return
+        try:
+            DYNAMIC_STOCKS_FILE.parent.mkdir(exist_ok=True)
+            data = {
+                "updated_at": datetime.now().isoformat(),
+                "stocks": dynamic,
+            }
+            with open(DYNAMIC_STOCKS_FILE, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.debug(f"Failed to save dynamic stocks: {e}")
+
     def get_universe(self) -> Dict[str, Stock]:
         """Get current universe (build if needed)"""
         if not self.universe:
@@ -689,6 +768,15 @@ def _search_ticker_by_name(company_name: str) -> Optional[tuple]:
             if price <= 0:
                 continue
 
+            # Name sanity check: the search result must actually match the
+            # requested company, not just a fuzzy lookalike (e.g. "Zen Technologies"
+            # should NOT resolve to "Zensar Technologies").
+            if not _name_matches(company_name, name):
+                logger.debug(
+                    f"Name search '{company_name}' -> {symbol} name mismatch ({name}), skipping"
+                )
+                continue
+
             # SAME safety filter as universe build (Problem 3)
             if not passes_stock_safety_filter(price, market_cap_cr, avg_vol_lakh):
                 logger.debug(f"Name search '{company_name}' -> {symbol} failed safety filter (price={price}, cap={market_cap_cr}Cr)")
@@ -713,12 +801,44 @@ def _search_ticker_by_name(company_name: str) -> Optional[tuple]:
             get_universe_builder().universe[symbol] = stock
 
             logger.info(f"Name search: '{company_name}' -> {symbol} = {name} | ₹{price:.2f} | {stock.market_cap_cr:.0f}Cr")
+            # Persist dynamic addition
+            try:
+                get_universe_builder()._save_dynamic_stocks()
+            except Exception:
+                pass
             return (symbol, stock)
 
     except Exception as e:
         logger.debug(f"Name search failed for '{company_name}': {e}")
 
     return None
+
+
+_NAME_STOP_TOKENS = {
+    "ltd", "limited", "pvt", "private", "inc", "incorporated", "corporation",
+    "corp", "group", "holdings", "company", "co", "india", "indian", "the",
+    "technologies", "technology", "systems", "system", "industries", "industry",
+    "international", "global", "enterprises", "enterprise", "limited",
+}
+
+
+def _name_tokens(name: str) -> List[str]:
+    tokens = re.findall(r"[a-zA-Z]{3,}", name.lower())
+    return [t for t in tokens if t not in _NAME_STOP_TOKENS]
+
+
+def _name_matches(search_name: str, candidate_name: str) -> bool:
+    """True if the searched company name plausibly matches the candidate name.
+    Requires at least one distinctive token of the searched name to appear as a
+    whole word in the candidate name. Falls back to True if no distinctive tokens."""
+    tokens = _name_tokens(search_name)
+    if not tokens:
+        return True
+    candidate = (candidate_name or "").lower()
+    for tok in tokens:
+        if re.search(r'\b' + re.escape(tok) + r'\b', candidate):
+            return True
+    return False
 
 
 def validate_ticker_on_the_fly(ticker: str, company_name: str = "") -> Optional[tuple]:
@@ -773,6 +893,11 @@ def validate_ticker_on_the_fly(ticker: str, company_name: str = "") -> Optional[
                         logger.info(f"Known ticker map + fetch: {ticker} -> {mapped_ticker} = {name} | ₹{price:.2f} | {stock.market_cap_cr:.0f}Cr")
                         result = (mapped_ticker, stock)
                         _dynamic_cache[ticker] = result
+                        # Persist dynamic addition
+                        try:
+                            get_universe_builder()._save_dynamic_stocks()
+                        except Exception:
+                            pass
                         return result
             except Exception as e:
                 logger.debug(f"Known ticker map fetch failed for {mapped_ticker}: {e}")
@@ -824,6 +949,11 @@ def validate_ticker_on_the_fly(ticker: str, company_name: str = "") -> Optional[
             logger.info(f"Dynamic validation: {t} = {name} | ₹{price:.2f} | {stock.market_cap_cr:.0f}Cr")
             result = (t, stock)
             _dynamic_cache[ticker] = result
+            # Persist dynamic addition
+            try:
+                get_universe_builder()._save_dynamic_stocks()
+            except Exception:
+                pass
             return result
 
         except Exception as e:
@@ -839,3 +969,12 @@ def validate_ticker_on_the_fly(ticker: str, company_name: str = "") -> Optional[
 
     _dynamic_cache[ticker] = None
     return None
+
+
+def save_dynamic_additions():
+    """Persist any dynamically added stocks to disk."""
+    try:
+        builder = get_universe_builder()
+        builder._save_dynamic_stocks()
+    except Exception:
+        pass

@@ -52,6 +52,13 @@ sectors:
       - "SUBROS"
       - "JINDALSTEL"
       - "RATNAMANI"
+      - "HAL"
+      - "BEL"
+      - "OFB"
+      - "AWEIL"
+      - "RDLS"
+      - "TASL"
+      - "MERLINHAWK"
 
   railways:
     keywords:

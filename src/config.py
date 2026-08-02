@@ -195,6 +195,12 @@ def get_schedule_config() -> dict:
     return settings.get("schedule", {})
 
 
+def get_research_config() -> dict:
+    """Get web research settings"""
+    settings = load_settings()
+    return settings.get("research", {})
+
+
 # For backward compatibility
 __all__ = [
     "load_settings",
@@ -217,4 +223,5 @@ __all__ = [
     "get_universe_config",
     "get_technical_config",
     "get_schedule_config",
+    "get_research_config",
 ]

@@ -48,6 +48,15 @@ Time Sensitivity:
 - MEDIUM: Policy announced, budget allocated (2-4 weeks)
 - LONG: Strategic plans, MoU signed (1-3 months)
 
+COMPANY-LESS NEWS RULE (money + decision, no name):
+- If the news involves a specific ₹ amount / budget / policy / geopolitical /
+  capital decision but names NO company, it IS a valid catalyst — do not filter it out.
+- Classify it (POLICY / GEOPOLITICAL / ORDER / CAPACITY) and fill "implied_companies"
+  with 2-5 concrete Indian listed companies most likely to benefit, based on your
+  knowledge of the sector and supply chain (e.g. defence budget → missile/defence makers).
+- Only filter out genuinely vague "sector outlook" commentary with no money, no decision,
+  and no named or implied company.
+
 Return JSON:
 {{
   "has_catalyst": true/false,
@@ -68,7 +77,6 @@ Return JSON:
 
 FILTER OUT:
 - Non-business news (politics, sports, entertainment)
-- Vague "sector outlook" without specific company mention
 - Pure market commentary with no specific stock mentioned"""
 
 
@@ -91,6 +99,12 @@ PRODUCT: {product_category}
 NAMED: {named_companies}
 SOURCE: {source}
 FULL_CONTENT: {content}
+
+KNOWN_SECTOR_COMPANIES (Indian listed companies in this sector — prefer these when they fit):
+{candidates}
+
+RESEARCH FINDINGS (web search results about this exact event):
+{research}
 
 Return JSON:
 {{
@@ -115,6 +129,14 @@ Return JSON:
   "competitors_mentioned": ["comp1", "comp2"],
   "supply_chain_hints": ["upstream/downstream company or product"]
 }}
+
+RULES FOR COMPANY-LESS NEWS:
+- If NAMED is empty, you MUST still list 2-5 concrete Indian listed companies
+  that benefit, using RESEARCH FINDINGS + KNOWN_SECTOR_COMPANIES + your market knowledge.
+- If RESEARCH FINDINGS name specific companies, prefer them (mentioned_explicitly=false).
+- Tickers may be approximate — the pipeline validates and corrects them.
+- If money flows to FOREIGN companies with no Indian listed beneficiary, list the
+  Indian listed supply-chain names instead, or leave "companies" empty.
 
 PRIORITIZE small/mid caps that are:
 - Direct suppliers to the named company
@@ -242,6 +264,10 @@ QUICK_FILTER_PROMPT = """Does this news contain a specific catalyst for small/mi
 TITLE: {title}
 SNIPPET: {snippet}
 
+A catalyst counts even if NO company is named — budget allocations, policy decisions,
+government orders/contracts, geopolitical spending, and other money + decision news
+can benefit specific listed companies.
+
 Return JSON:
 {{
   "relevant": true/false,
@@ -249,6 +275,47 @@ Return JSON:
   "likely_sector": "defence/railways/ev/renewable/infra/manufacturing/chemicals/pharma/it/other",
   "urgency": "HIGH/MEDIUM/LOW"
 }}"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RESEARCH (Company-less catalyst news) - narrow down who benefits
+# ─────────────────────────────────────────────────────────────────────────────
+
+RESEARCH_SYSTEM = """You are a market researcher narrowing down which Indian listed
+companies benefit from a catalyst event, using web search results.
+Only Indian listed companies (NSE/BSE) are tradeable. Return ONLY valid JSON."""
+
+RESEARCH_PROMPT = """A catalyst event involves money + a decision, but the article names no company.
+Use the web search results to find WHO is actually involved and narrow down beneficiaries.
+
+EVENT: {event_summary}
+TYPE: {catalyst_type}
+MONEY: {money_involved}
+PRODUCT: {product_category}
+
+WEB SEARCH RESULTS:
+{results}
+
+Analyze:
+1. Which companies are ACTUALLY mentioned in these results (even foreign ones)?
+2. Where is the money going (country/geography)?
+3. Which INDIAN listed companies (NSE/BSE) benefit, directly or via supply chain?
+   If money goes to foreign companies, find the Indian listed suppliers/subsidiaries.
+
+Return JSON:
+{{
+  "companies_mentioned": [{{"name": "Company", "context": "what the result says"}}],
+  "geography_hint": "e.g. USA, India, Europe, unknown",
+  "foreign_beneficiary_only": true/false,
+  "likely_beneficiaries": [
+    {{"name": "Indian company", "ticker": "EXACT.NS or null", "why": "link to THIS event"}}
+  ],
+  "confidence": 0-100,
+  "gap_note": "what is still unknown (max 80 chars)"
+}}
+
+If the results contain no useful company information, return empty lists and
+foreign_beneficiary_only=false."""
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPER FUNCTIONS
@@ -276,7 +343,7 @@ def build_triage_prompt(article: dict) -> tuple:
     )
 
 
-def build_entity_prompt(triage: dict, article: dict) -> tuple:
+def build_entity_prompt(triage: dict, article: dict, candidates: str = "", research: str = "") -> tuple:
     return ENTITY_SYSTEM, ENTITY_PROMPT.format(
         event_summary=triage.get("event_summary", ""),
         catalyst_type=triage.get("catalyst_type", ""),
@@ -284,8 +351,21 @@ def build_entity_prompt(triage: dict, article: dict) -> tuple:
         product_category=triage.get("product_category", ""),
         named_companies=triage.get("named_companies", []),
         source=article.get("source", ""),
-        content=article.get("content", "")[:2000]
+        content=article.get("content", "")[:2000],
+        candidates=candidates or "(none provided)",
+        research=research or "(none provided)",
     )
+
+
+def format_research_results(results: list) -> str:
+    """Format web research results for the research/entity prompts."""
+    lines = []
+    for i, r in enumerate(results, 1):
+        source = r.get("source", "")
+        lines.append(
+            f"{i}. {r.get('title', '')} ({source}) — {r.get('snippet', '')[:200]}"
+        )
+    return "\n".join(lines) if lines else "(no results)"
 
 
 def build_impact_prompt(triage: dict, entities: dict) -> tuple:
@@ -319,3 +399,13 @@ def build_trade_prompt(prediction: dict, current_price: float = 0) -> tuple:
 
 def build_quick_filter_prompt(title: str, snippet: str) -> tuple:
     return QUICK_FILTER_SYSTEM, QUICK_FILTER_PROMPT.format(title=title, snippet=snippet)
+
+
+def build_research_prompt(triage: dict, results: list) -> tuple:
+    return RESEARCH_SYSTEM, RESEARCH_PROMPT.format(
+        event_summary=triage.get("event_summary", ""),
+        catalyst_type=triage.get("catalyst_type", ""),
+        money_involved=triage.get("money_involved", "null"),
+        product_category=triage.get("product_category", ""),
+        results=format_research_results(results),
+    )

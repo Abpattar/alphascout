@@ -107,6 +107,12 @@ async def run_pipeline(use_cache: bool = True, max_signals: int = 5) -> list:
             print(f"   🧠 Ensemble: {'YES' if s.get('ensemble_agreement') else 'NO'}")
             print(f"   ⚡ Auto-Execute: {'YES' if auto_exec else 'NO (manual review)'}")
             print(f"   ℹ️  {s.get('auto_execute_reason', '')}")
+            if s.get("implied_beneficiary"):
+                print(f"   🔎 Implied beneficiary: company NOT named in news (inferred via research)")
+            rel = (s.get("relation") or "").strip()
+            print(f"   🏭 {s['stock'].get('sector_display', s['stock'].get('sector', '?'))}" + (f" | {rel}" if rel else ""))
+            if s.get("stock", {}).get("newly_added"):
+                print(f"   🆕 Newly discovered company — added to universe on the fly")
     else:
         print("\n⚠️  No qualifying signals found today")
 
@@ -199,6 +205,12 @@ async def run_screener_pipeline(use_cache: bool = True, max_signals: int = 5) ->
             print(f"   🧠 Ensemble: {'YES' if s.get('ensemble_agreement') else 'NO'}")
             print(f"   ⚡ Auto-Execute: {'YES' if auto_exec else 'NO (manual review)'}")
             print(f"   ℹ️  {s.get('auto_execute_reason', '')}")
+            if s.get("implied_beneficiary"):
+                print(f"   🔎 Implied beneficiary: company NOT named in news (inferred via research)")
+            rel = (s.get("relation") or "").strip()
+            print(f"   🏭 {s['stock'].get('sector_display', s['stock'].get('sector', '?'))}" + (f" | {rel}" if rel else ""))
+            if s.get("stock", {}).get("newly_added"):
+                print(f"   🆕 Newly discovered company — added to universe on the fly")
     else:
         print("\n⚠️  No qualifying signals found")
         print("   The screener found candidates but no matching news articles.")

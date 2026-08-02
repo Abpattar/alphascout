@@ -5,6 +5,7 @@ Optimized with pre-filtering and parallel execution
 """
 import json
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
@@ -23,9 +24,131 @@ from src.universe.ticker_map import extract_tickers, resolve_ticker, get_mapper
 
 logger = logging.getLogger(__name__)
 
+# Readable labels for universe sector slugs
+_SECTOR_LABELS = {
+    "defence": "Defence",
+    "railways": "Railways",
+    "ev": "EV",
+    "renewable": "Renewable/Green Energy",
+    "infra": "Infrastructure",
+    "manufacturing_pli": "Manufacturing (PLI)",
+    "chemicals_specialty": "Specialty Chemicals",
+    "logistics": "Logistics",
+    "consumer": "Consumer",
+    "it": "IT/AI",
+    "it_services": "IT/AI",
+    "software": "IT/AI",
+    "ai": "AI",
+}
+
+# Catalyst product_category -> sector slug (used for display; the catalyst sector
+# is usually a better description of what a newly-found company is related to)
+_CATEGORY_TO_SECTOR = {
+    "defence": "defence", "defense": "defence", "military": "defence",
+    "missile": "defence", "drones": "defence", "drone": "defence",
+    "railways": "railways", "rail": "railways",
+    "ev": "ev", "electric": "ev", "ev infrastructure": "ev",
+    "renewable": "renewable", "solar": "renewable", "green energy": "renewable",
+    "infra": "infra", "infrastructure": "infra",
+    "manufacturing": "manufacturing_pli", "manufacturing pli": "manufacturing_pli",
+    "chemicals": "chemicals_specialty", "chemical": "chemicals_specialty",
+    "logistics": "logistics",
+    "consumer": "consumer",
+    "ai": "it", "it": "it", "software": "it", "technology": "it", "tech": "it",
+    "telecom": "it",
+}
+
+_NAME_SUFFIX_MAP = {
+    "ltd": "limited",
+    "corp": "corporation",
+    "co": "company",
+    "inc": "incorporated",
+    "pvt": "private",
+    "llc": "limited",
+}
+
+
+def _norm_name(s: str) -> str:
+    """Normalize a company name for comparison: lowercase, strip punctuation,
+    expand common abbreviations (ltd -> limited)."""
+    s = s.lower()
+    for a, b in ((".", " "), (",", " "), ("-", " "), ("&", " and "), ("'", "")):
+        s = s.replace(a, b)
+    words = re.sub(r"\s+", " ", s).strip().split(" ")
+    return " ".join(_NAME_SUFFIX_MAP.get(w, w) for w in words if w)
+
+
+def _reconcile_name_ticker(
+    ticker: str,
+    pred_name: str,
+    universe: Dict[str, Any],
+    resolve_fn=resolve_ticker,
+) -> Optional[str]:
+    """Return the reconciled ticker for a prediction, or None if the
+    name/ticker pairing is inconsistent (LLM confusion).
+
+    LLMs sometimes pair a company name with the wrong ticker (e.g. "Zen Tech"
+    with WAAREE.BO, or "MTAR Technologies" with TATATECH.NS). A ticker is
+    accepted only if the predicted name matches the stock's name OR the
+    ticker base. If it matches neither, an alternate is tried and accepted
+    only when its own name/base matches in turn; otherwise the prediction
+    is rejected.
+    """
+    if not pred_name:
+        return ticker
+    if ticker not in universe:
+        return None
+    stock_name = _norm_name(universe[ticker].name or "")
+    pred_lower = _norm_name(pred_name)
+    ticker_base = ticker.split(".")[0].lower()
+    if pred_lower in stock_name or stock_name in pred_lower:
+        return ticker
+    if ticker_base in pred_lower or (len(pred_lower) >= 3 and pred_lower in ticker_base):
+        return ticker
+    alt = resolve_fn(pred_name)
+    if alt and alt in universe:
+        alt_name = _norm_name(universe[alt].name or "")
+        alt_base = alt.split(".")[0].lower()
+        if (
+            pred_lower in alt_name
+            or alt_name in pred_lower
+            or alt_base in pred_lower
+            or (len(pred_lower) >= 3 and pred_lower in alt_base)
+        ):
+            return alt
+    return None
+
+
 # ── NSE/BSE real lookup table (Issue 1) ──────────────────────────────────────
 _NSE_BSE_LOOKUP: Dict[str, str] = {}
 _UNRESOLVED_LOG_PATH = Path(__file__).parent.parent.parent / "data" / "unresolved_candidates.jsonl"
+
+# ── Generic company-less catalyst detection (Check 5) ─────────────────────────
+_MONEY_RE = re.compile(
+    r'(?:rs\.?|inr|₹)?\s?\d[\d,]*(?:\.\d+)?\s*'
+    r'(?:cr|crore|lakh|lacs|million|mn|billion|bn)\b',
+    re.IGNORECASE,
+)
+
+_DECISION_KEYWORDS = [
+    "order", "contract", "tender", "deal", "budget", "allocation", "allocated",
+    "policy", "scheme", "subsidy", "capex", "expansion", "acquisition", "merger",
+    "investment", "funding", "export", "sanction", "approval", "approved",
+    "joint venture", "partnership", "auction", "project", "grant", "missile",
+    "defence", "defense", "railway", "railways", "renewable", "electric vehicle",
+    "battery", "pharma", "infrastructure", "agreement", "procurement", "mou",
+]
+_DECISION_KEYWORDS_SHORT = ["ev", "pli", "mod"]
+
+
+def _has_decision_keyword(text_lower: str) -> bool:
+    for kw in _DECISION_KEYWORDS:
+        if kw in text_lower:
+            return True
+    for kw in _DECISION_KEYWORDS_SHORT:
+        if re.search(r'\b' + re.escape(kw) + r'\b', text_lower):
+            return True
+    return False
 
 
 def _load_nse_bse_lookup() -> Dict[str, str]:
@@ -100,6 +223,7 @@ class ImpactPrediction:
     technical_support: str = ""
     supply_chain_tier: str = ""
     catalyst_to_revenue: str = ""
+    implied_beneficiary: bool = False
 
     @classmethod
     def from_dict(cls, d: dict) -> "ImpactPrediction":
@@ -136,6 +260,8 @@ class TradePlan:
     risks: List[str] = field(default_factory=list)
     technical_checklist: Dict = field(default_factory=dict)
     catalyst_expiry: str = ""
+    implied_beneficiary: bool = False
+    relation: str = ""
 
     @classmethod
     def from_dict(cls, d: dict) -> "TradePlan":
@@ -167,6 +293,7 @@ class AnalysisPipeline:
         self.registry = get_registry()
         self.mapper = get_mapper()
         self._db = None
+        self._base_universe = set(self.mapper.universe.keys())
 
     @property
     def db(self):
@@ -230,8 +357,13 @@ class AnalysisPipeline:
                     return None
                 logger.info(f"Note: {title} — medium PR/pump risk, will reduce confidence")
 
+            # Stage 1.5: Web research for company-less catalyst news
+            research = None
+            if not triage.named_companies:
+                research = self._research_catalyst(triage, article_id)
+
             # Stage 2: Entity Extraction
-            entities = self._extract_entities(triage, article)
+            entities = self._extract_entities(triage, article, research=research, article_id=article_id)
             self._log_to_db(article_id, "entity_extraction", "ensemble",
                             entities.__dict__ if entities else {})
             if not entities or not entities.companies:
@@ -312,9 +444,143 @@ class AnalysisPipeline:
 
         return TriageResult(**result)
 
-    def _extract_entities(self, triage: TriageResult, article: Dict) -> Optional[EntityResult]:
+    def _research_catalyst(self, triage: TriageResult, article_id=None) -> Optional[dict]:
+        """
+        Stage 1.5: For company-less catalyst news, search the web and have the
+        LLM narrow down which specific companies are involved/benefit.
+        Returns {"query", "results", "narrowing"} or None (never raises).
+        """
+        try:
+            from src.research.searcher import research_news
+            from src.ai.prompts import build_research_prompt
+            from src.config import get_research_config
+
+            cfg = get_research_config()
+            if not cfg.get("enabled", True):
+                return None
+
+            query = self._build_research_query(triage)
+            results = research_news(
+                query,
+                max_results=int(cfg.get("max_results", 8)),
+                freshness_days=int(cfg.get("freshness_days", 7)),
+            )
+            if not results:
+                logger.info(f"Research: no web results for '{query}'")
+                return None
+
+            system, prompt = build_research_prompt(triage.__dict__, results)
+            narrowing = self.registry.execute_task(
+                "research", system, prompt,
+                max_tokens=700, temperature=0.1, require_ensemble=False,
+            )
+            if not narrowing:
+                return None
+
+            self._log_to_db(article_id, "research", "ensemble", {
+                "query": query,
+                "results": [{k: r.get(k) for k in ("title", "link", "source", "published")} for r in results[:6]],
+                "narrowing": narrowing,
+            })
+            return {"query": query, "results": results, "narrowing": narrowing}
+
+        except Exception as e:
+            logger.warning(f"Research failed: {e}")
+            return None
+
+    def _build_research_query(self, triage: TriageResult) -> str:
+        """Build a SHORT keyword query for web search (long sentences get 0 hits)."""
+        parts = []
+        cat = triage.product_category
+        if cat and cat != "other":
+            parts.append(cat)
+        if triage.money_involved:
+            parts.append(triage.money_involved)
+        key_tokens = self._key_tokens(triage.event_summary, max_n=5)
+        if key_tokens:
+            parts.extend(key_tokens)
+        text = " ".join(parts)
+        return text[:120] or "india defence order"
+
+    @staticmethod
+    def _key_tokens(text: str, max_n: int = 5) -> List[str]:
+        """Extract meaningful search tokens from a sentence (drop stopwords)."""
+        if not text:
+            return []
+        stop = {
+            "the", "a", "an", "of", "to", "in", "for", "by", "with", "on", "is",
+            "are", "was", "were", "will", "could", "would", "should", "has", "have",
+            "had", "been", "being", "and", "but", "or", "as", "over", "under",
+            "its", "their", "it", "this", "that", "these", "those", "from", "at",
+            "after", "before", "more", "most", "also", "now", "yet", "new", "only",
+            "said", "says", "according", "target", "targets", "drive", "driven",
+            "swell", "swelled", "may", "might", "towards", "among", "between",
+            "rs", "inr", "cr", "crore", "lakh", "up", "down", "into", "out",
+        }
+        seen = set()
+        out = []
+        for tok in re.findall(r"[a-zA-Z]{3,}", (text or "").lower()):
+            if tok in stop or tok in seen:
+                continue
+            seen.add(tok)
+            out.append(tok)
+            if len(out) >= max_n:
+                break
+        return out
+
+    def _build_sector_candidates(self, category: str, limit: int = 15) -> str:
+        """Known Indian listed companies for this sector — grounds the LLM so it
+        names real listed companies instead of hallucinating tickers."""
+        from src.config import get_all_sector_tickers
+        sector_map = {
+            "defence": "defence", "railways": "railways", "ev": "ev",
+            "renewable": "renewable", "infra": "infra",
+            "manufacturing": "manufacturing_pli", "chemicals": "chemicals_specialty",
+            "logistics": "logistics", "consumer": "consumer",
+        }
+        sector = sector_map.get(category, category)
+        all_tickers = get_all_sector_tickers()
+        tickers = all_tickers.get(sector, [])
+        if not tickers:
+            tickers = [t for ts in all_tickers.values() for t in ts]
+
+        names = []
+        seen = set()
+        for base in tickers:
+            if base in seen:
+                continue
+            seen.add(base)
+            nse = f"{base}.NS"
+            stock = self.mapper.universe.get(nse) or self.mapper.universe.get(f"{base}.BO")
+            names.append(f"{stock.name} ({nse})" if stock else nse)
+            if len(names) >= limit:
+                break
+        return "\n".join(names)
+
+    def _format_research_for_prompt(self, research: dict) -> str:
+        if not research:
+            return ""
+        from src.ai.prompts import format_research_results
+        lines = ["WEB SEARCH RESULTS:"]
+        lines.append(format_research_results(research["results"]))
+        narrowing = research.get("narrowing") or {}
+        if narrowing.get("geography_hint"):
+            lines.append(f"GEOGRAPHY: money goes to {narrowing['geography_hint']}")
+        if narrowing.get("companies_mentioned"):
+            mentioned = "; ".join(
+                f"{c.get('name', '')} ({c.get('context', '')})" for c in narrowing["companies_mentioned"]
+            )
+            lines.append(f"COMPANIES MENTIONED IN RESULTS: {mentioned[:600]}")
+        if narrowing.get("foreign_beneficiary_only"):
+            lines.append("NOTE: beneficiaries appear to be foreign — look for Indian listed suppliers.")
+        return "\n".join(lines)
+
+    def _extract_entities(self, triage: TriageResult, article: Dict, research: Optional[dict] = None,
+                          article_id=None) -> Optional[EntityResult]:
         """Stage 2: Extract companies and financial details"""
-        system, prompt = build_entity_prompt(triage.__dict__, article)
+        candidates = self._build_sector_candidates(triage.product_category)
+        research_text = self._format_research_for_prompt(research)
+        system, prompt = build_entity_prompt(triage.__dict__, article, candidates=candidates, research=research_text)
 
         result = self.registry.execute_task(
             "entity_extraction",
@@ -384,10 +650,46 @@ class AnalysisPipeline:
                         p["ticker"] = actual_ticker
                         ticker = actual_ticker
                 else:
-                    logger.warning(f"DISCARDED: {ticker} ({company_name}) — not in universe, failed validation")
-                    continue
+                    # Try NSE/BSE lookup table as fallback
+                    nse_lookup = _load_nse_bse_lookup()
+                    name_lower = company_name.lower()
+                    found_via_lookup = False
+                    for name_key, lookup_ticker in nse_lookup.items():
+                        if len(name_key) < 4:
+                            continue
+                        if name_key in name_lower or name_lower in name_key:
+                            # Try to validate this ticker
+                            result_tuple = validate_ticker_on_the_fly(lookup_ticker, company_name)
+                            if result_tuple:
+                                actual_ticker, stock = result_tuple
+                                logger.info(f"NSE/BSE lookup: {company_name} -> {actual_ticker} ({stock.name})")
+                                p["ticker"] = actual_ticker
+                                ticker = actual_ticker
+                                found_via_lookup = True
+                                break
+                    if not found_via_lookup:
+                        logger.warning(f"DISCARDED: {ticker} ({company_name}) — not in universe, failed validation")
+                        continue
 
             stock = self.mapper.universe[ticker]
+
+            # Name/ticker consistency check: LLMs sometimes mix up names and tickers
+            # (e.g. name "Zen Tech" paired with ticker WAAREE.BO). When the ticker
+            # is already in the universe, no validation happens, so verify manually.
+            pred_name = (p.get("name") or "").strip()
+            reconciled = _reconcile_name_ticker(ticker, pred_name, self.mapper.universe)
+            if reconciled is None:
+                logger.warning(
+                    f"DISCARDED: {ticker} name/ticker mismatch ('{pred_name}') — LLM confusion"
+                )
+                continue
+            if reconciled != ticker:
+                logger.warning(
+                    f"Name/ticker mismatch: {ticker} vs '{pred_name}' — remapping to {reconciled}"
+                )
+                ticker = reconciled
+                stock = self.mapper.universe[reconciled]
+                p["ticker"] = reconciled
 
             # Same safety filter as universe build (Problem 3: one filter function everywhere)
             from src.universe.builder import passes_stock_safety_filter
@@ -401,6 +703,15 @@ class AnalysisPipeline:
 
             try:
                 pred_obj = ImpactPrediction.from_dict(p)
+                # Flag + penalize implied beneficiaries (company never named in news)
+                implied = self._is_implied_beneficiary(pred_obj.name, entities)
+                pred_obj.implied_beneficiary = implied
+                if implied:
+                    logger.info(
+                        f"Implied beneficiary (not named in news): {ticker} ({pred_obj.name}) — "
+                        f"confidence penalized"
+                    )
+                    pred_obj.confidence = max(55, int(pred_obj.confidence * 0.85))
                 # Penalize large-caps in ranking (reduce confidence by 15%)
                 if is_large_cap:
                     pred_obj.confidence = max(60, int(pred_obj.confidence * 0.85))
@@ -412,6 +723,19 @@ class AnalysisPipeline:
                 logger.warning(f"Failed to create ImpactPrediction for {ticker}: {e}")
 
         return predictions
+
+    def _is_implied_beneficiary(self, pred_name: str, entities: EntityResult) -> bool:
+        """True if the predicted company was NOT explicitly named in the article."""
+        if not pred_name:
+            return True
+        pred_lower = pred_name.strip().lower()
+        for comp in entities.companies:
+            name = (comp.get("name") or "").strip().lower()
+            if not name:
+                continue
+            if pred_lower == name or pred_lower in name or name in pred_lower:
+                return not bool(comp.get("mentioned_explicitly"))
+        return True
 
     def _create_trade(self, pred: ImpactPrediction, triage: TriageResult) -> Optional[TradePlan]:
         """Stage 4: Create executable trade plan (with circuit history check for Problem 8)"""
@@ -490,7 +814,10 @@ class AnalysisPipeline:
             return None
 
         try:
-            return TradePlan.from_dict(result)
+            trade = TradePlan.from_dict(result)
+            trade.implied_beneficiary = pred.implied_beneficiary
+            trade.relation = (pred.reasoning or pred.catalyst_to_revenue or "").strip()
+            return trade
         except Exception as e:
             logger.debug(f"Failed to create TradePlan: {e}")
             return None
@@ -511,6 +838,12 @@ class AnalysisPipeline:
             should_auto = trade.confidence >= 90
             auto_reason = "raw confidence threshold"
 
+        # Display sector: prefer the catalyst-derived sector (what the company is
+        # related to), fall back to the stock's own assigned sector.
+        catalyst_sector = _CATEGORY_TO_SECTOR.get((triage.product_category or "").lower())
+        stock_label = (_SECTOR_LABELS.get(stock.sector, stock.sector.title()) if stock else "Unknown")
+        sector_display = _SECTOR_LABELS.get(catalyst_sector, "") or stock_label
+
         return {
             "signal_id": f"{trade.ticker}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
             "timestamp": datetime.now().isoformat(),
@@ -530,14 +863,18 @@ class AnalysisPipeline:
             "stock": {
                 "name": stock.name if stock else trade.name,
                 "sector": stock.sector if stock else "unknown",
+                "sector_display": sector_display,
                 "exchange": stock.exchange if stock else "unknown",
                 "market_cap_cr": stock.market_cap_cr if stock else 0,
                 "price": stock.price if stock else 0,
+                "newly_added": bool(stock and trade.ticker not in self._base_universe),
             },
             "trade": asdict(trade),
             "calibrated_confidence": calibrated_conf,
             "auto_execute": should_auto,
             "auto_execute_reason": auto_reason,
+            "implied_beneficiary": trade.implied_beneficiary,
+            "relation": trade.relation,
             "ensemble_agreement": trade.__dict__.get("ensemble_agreement", False)
         }
 
@@ -549,7 +886,8 @@ class AnalysisPipeline:
         Articles pass if they mention:
           (a) a ticker already in the live universe, OR
           (b) a known company name/alias from the lookup table, OR
-          (c) a small-cap keyword (fallback to catch new companies).
+          (c) a small-cap keyword (fallback to catch new companies), OR
+          (d) any company name that looks like it could be a listed stock.
         """
         nse_lookup = _load_nse_bse_lookup()
         small_cap_keywords = [
@@ -587,10 +925,33 @@ class AnalysisPipeline:
                 # Check 3: Small-cap keywords (catch-all for unknown companies)
                 has_small_cap_kw = any(kw in text_lower for kw in small_cap_keywords)
 
-                if found_tickers or has_nse_match or has_small_cap_kw:
+                # Check 4: Any company-like name (relaxed filter for auto-discovery)
+                has_company_name = False
+                if not found_tickers and not has_nse_match and not has_small_cap_kw:
+                    # Look for company names that could be listed stocks
+                    company_patterns = [
+                        r'(?:shares? of|stock of|stock in)\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,3})',
+                        r'([A-Z][A-Za-z]+(?:\s+(?:Ltd|Limited|Industries|Systems|Technologies|Defence|Aerospace|Engineering|Power|Motors|Chemicals|Pharma|Infra|Energy)))\b',
+                    ]
+                    for pattern in company_patterns:
+                        matches = re.findall(pattern, article_dict.get('title', '') + ' ' + article_dict.get('content', '')[:500])
+                        if matches:
+                            has_company_name = True
+                            break
+
+                # Check 5: Money + impactful decision (company-less catalyst news,
+                # e.g. "Govt allocates ₹120 crore for missiles" with no company named)
+                has_generic_catalyst = False
+                if not found_tickers and not has_nse_match:
+                    if _MONEY_RE.search(text) and _has_decision_keyword(text_lower):
+                        has_generic_catalyst = True
+
+                if found_tickers or has_nse_match or has_small_cap_kw or has_company_name or has_generic_catalyst:
                     article_dict['_matched_tickers'] = found_tickers
                     article_dict['_matched_nse_names'] = matched_nse_names
                     article_dict['_has_small_cap_keyword'] = has_small_cap_kw
+                    article_dict['_has_company_name'] = has_company_name
+                    article_dict['_has_generic_catalyst'] = has_generic_catalyst
                     filtered_articles.append(article_dict)
 
             except Exception as e:
@@ -600,7 +961,9 @@ class AnalysisPipeline:
             f"Pre-filtered: {len(filtered_articles)}/{len(articles)} articles "
             f"(universe tickers: {sum(1 for a in filtered_articles if a.get('_matched_tickers'))}, "
             f"NSE/BSE lookup: {sum(1 for a in filtered_articles if a.get('_matched_nse_names'))}, "
-            f"small-cap keywords: {sum(1 for a in filtered_articles if a.get('_has_small_cap_keyword'))})"
+            f"small-cap keywords: {sum(1 for a in filtered_articles if a.get('_has_small_cap_keyword'))}, "
+            f"company names: {sum(1 for a in filtered_articles if a.get('_has_company_name'))}, "
+            f"generic money+decision: {sum(1 for a in filtered_articles if a.get('_has_generic_catalyst'))})"
         )
 
         if not filtered_articles:

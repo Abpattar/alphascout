@@ -10,6 +10,8 @@ data/*.json
 data/*.pkl
 data/*.jsonl
 data/*.db
+data/price_history/
+data/run_*.log
 *.enc
 *.db
 IDE/
