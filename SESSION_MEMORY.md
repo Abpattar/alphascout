@@ -1,6 +1,35 @@
 # AlphaScout Session Memory
-**Last Updated:** 2026-08-02 (Session 9)
+**Last Updated:** 2026-08-04 (Session 10)
 **Project Root:** `D:\Codes\alphascout`
+
+---
+
+## Session 10 (2026-08-04) — Trade-Plan Validation + Outcome Resolution (first real accuracy data)
+
+### What we did
+1. ✅ **Fixed the highest-impact data-quality bugs** before trusting accuracy numbers: LLM trade plans were reaching the DB invalid (inverted target/stop, entry=0, garbage thesis like 'x'). Added `AnalysisPipeline._validate_trade_plan()` (`src/analysis/pipeline.py`) which:
+   - Rejects LONG target<=entry / stop>=entry, NEUTRAL direction, entry<=0 (falls back to current price), target_pct out of 2–40, stop_pct<=0 or >15, recomputed R:R < 1.5.
+   - **Honest R:R recompute** — LLM-claimed R:R is systematically inflated (a 12%/6% plan is really ~2x, but typical 10%/7% plans are ~1.4x). Floor 1.5 in code (config `min_risk_reward_ratio: 2.0` would starve the pipeline). Stored `trade.risk_reward_ratio` is now the honest recomputed value.
+   - Rejects garbage thesis (`_GARBAGE_THESIS`: x, n/a, test…) and normalises numeric levels to plain strings (outcomes depend on a non-zero `entry_price`).
+   - Verified live: today's run stored `CYIENT.NS entry=820 target=798 stop=918` (inverted) and `PNCINFRA.NS entry=0` — both now impossible.
+2. ✅ **Non-stock entity guard** — `_NON_STOCK_ENTITIES` (drdo, isro, barc, sebi, indian navy, mod, …) discarded in `_analyze_impact` before ticker reconciliation, even if a ticker is attached.
+3. ✅ **Per-ticker signal cooldown** — `_signal_in_cooldown(output, hours=48)` wired into `analyze_article` before `db.store_signal` (uses existing `db.get_recent_signals`). Stops duplicate-signal spam across runs.
+4. ✅ **Purged 5 garbage signals from DB** (user-approved): TATATECH.NS (MTAR Tech), WAAREE.BO ×2 (Zen Tech), DEVIT.NS (DRDO), PNCINFRA.NS (entry=0). 20 signals remain.
+5. ✅ **First real outcome resolution** — 16/20 signals resolved via yfinance (`scripts/backtest.py resolve --days 30`), 4 skipped (same-day, too fresh). 3 wins, 2 losses, 11 holds.
+   - **Wins**: IDEAFORGE.NS 50% conf (+3.1%), APOLLO.BO 60% (+5.6%), DEVIT.NS 59% (+8.2%).
+   - **Losses**: ZENTEC.NS 72% conf (−7.8%, stop hit), DATAPATTNS.NS 72% (−3.4%, stop hit).
+   - **Key finding**: high LLM confidence is NOT reliable — the only two 70s-bucket signals BOTH lost; win rate 18.8% (3/16), expectancy −3.48%, PF 1.51.
+6. ✅ **Auto-resolution on every run** — `main.py::auto_resolve_outcomes()` now calls `resolve_outcomes` + recalibrates at the start of `run_pipeline()` and `run_screener_pipeline()` (best-effort, never raises, min_age 1 day). Outcomes now accumulate even without a 24/7 scheduler.
+7. ✅ **Calibration now real-data driven** — `python main.py calibrate`: 60-69 bucket (12 sigs) → 25%→calibrated 30%; 70-79 (4 sigs) → 0%→30% floor. Auto-execute effectively gated off (no bucket reaches 80%).
+
+### Caveat
+- Calibration/backtest counts duplicate signals of the same underlying trade (5× DEVIT, 4× APOLLO, 3× IDEAFORGE pre-cooldown). Cooldown prevents future duplicates but existing ones bias buckets; treat the numbers as directional, not precise.
+- 11/16 outcomes are HOLD (never hit target or stop within horizon) — win rate counts them as non-wins.
+
+### Suggested next steps (continue here)
+1. Wire Session-8 backtest winners (price-only spikes, defence/railways) into the live screener as filters.
+2. Consider deduping same-ticker outcomes before calibration.
+3. Keep accumulating outcomes (auto-resolve now runs with every `run`/`scan`).
 
 ---
 
@@ -369,6 +398,12 @@ python -c "from src.universe.builder import get_universe; u = get_universe(); pr
 ---
 
 ## Key Files Modified
+
+### Session 10 — Trade-plan validation + outcome resolution + auto-resolve
+- `src/analysis/pipeline.py` — `_parse_price()`, `_GARBAGE_THESIS`, `_NON_STOCK_ENTITIES`, `_validate_trade_plan()` (inverted/degenerate plan rejection, honest R:R ≥1.5, thesis guard, level normalisation), `_signal_in_cooldown()` (48h per-ticker), non-stock entity guard in `_analyze_impact`, validation wired into `_create_trade`
+- `main.py` — `auto_resolve_outcomes()` called at start of `run_pipeline` and `run_screener_pipeline` (resolve + recalibrate, best-effort)
+- `scripts/backtest.py` — `resolve_outcomes()` gains `min_age_days=1` (skips same-day signals, no wasted yfinance call)
+- `SESSION_MEMORY.md` — Session 10 section (this)
 
 ### Session 9 — Company-less catalysts + research + name/ticker guard
 - `src/research/searcher.py`, `src/research/__init__.py` — **NEW** — `research_news()` via Google/Bing News RSS (no API key)

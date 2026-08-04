@@ -68,6 +68,35 @@ _NAME_SUFFIX_MAP = {
 }
 
 
+def _parse_price(val) -> float:
+    """Extract the first numeric price from a trade-plan field (number or string
+    like 'Break above 395' or '₹395 - ₹405'). Returns 0 if none found."""
+    if isinstance(val, (int, float)):
+        return float(val)
+    if not val:
+        return 0.0
+    nums = re.findall(r'\d+(?:\.\d+)?', str(val).replace(',', ''))
+    if not nums:
+        return 0.0
+    return float(nums[0])
+
+
+_GARBAGE_THESIS = {
+    "x", "n/a", "na", "none", "-", "--", "tbd", "tba", "pending", "test",
+    "null", "nil", "nill", "unknown", "?", "??", "todo", "n/a.",
+}
+
+
+# Non-listed / non-stock entities the LLM sometimes names as companies.
+# Only clearly-non-listed organisations belong here (never listed stocks).
+_NON_STOCK_ENTITIES = {
+    "drdo", "isro", "barc", "npcil", "iaf", "ins", "cdot", "nsil", "dgqa",
+    "ada", "defence research and development organisation", "gsl", "gsfc space",
+    "indian navy", "indian army", "indian air force", "railway board",
+    "sebi", "nse", "bse", "rbi", "mod", "ministry of defence",
+}
+
+
 def _norm_name(s: str) -> str:
     """Normalize a company name for comparison: lowercase, strip punctuation,
     expand common abbreviations (ltd -> limited)."""
@@ -393,6 +422,14 @@ class AnalysisPipeline:
             best = max(trades, key=lambda t: t.confidence * t.risk_reward_ratio)
             output = self._format_output(best, triage, article)
 
+            # Per-ticker cooldown: don't spam the same stock across runs
+            if self.db and output and self._signal_in_cooldown(output):
+                logger.info(
+                    f"COOLDOWN: {output['trade']['ticker']} already signaled "
+                    f"recently — skipping"
+                )
+                return None
+
             # Store final signal in DB
             if self.db and output:
                 try:
@@ -677,6 +714,18 @@ class AnalysisPipeline:
             # (e.g. name "Zen Tech" paired with ticker WAAREE.BO). When the ticker
             # is already in the universe, no validation happens, so verify manually.
             pred_name = (p.get("name") or "").strip()
+
+            # Non-stock entity guard: reject govt organisations / regulators the
+            # LLM occasionally names as companies (e.g. DRDO, ISRO, SEBI) — they
+            # can never be a tradeable stock, no matter what ticker is attached.
+            if pred_name:
+                norm = _norm_name(pred_name)
+                if norm in _NON_STOCK_ENTITIES:
+                    logger.warning(
+                        f"DISCARDED: {ticker} named non-stock entity '{pred_name}' — not a company"
+                    )
+                    continue
+
             reconciled = _reconcile_name_ticker(ticker, pred_name, self.mapper.universe)
             if reconciled is None:
                 logger.warning(
@@ -817,10 +866,126 @@ class AnalysisPipeline:
             trade = TradePlan.from_dict(result)
             trade.implied_beneficiary = pred.implied_beneficiary
             trade.relation = (pred.reasoning or pred.catalyst_to_revenue or "").strip()
-            return trade
         except Exception as e:
             logger.debug(f"Failed to create TradePlan: {e}")
             return None
+
+        # Problem 12: sanity-check the trade plan. LLMs sometimes emit inverted
+        # or degenerate plans (target below entry, stop above entry, entry=0,
+        # thesis='x'). Reject them here before they reach the DB/Telegram.
+        return self._validate_trade_plan(trade, current_price)
+
+    def _validate_trade_plan(
+        self, trade: TradePlan, current_price: float
+    ) -> Optional[TradePlan]:
+        """Validate and normalise an executable trade plan.
+
+        Returns a TradePlan whose numeric levels are consistent (target above
+        entry, stop below entry for LONG; inverse for SHORT) with a usable
+        entry price and a real thesis, or None to discard the plan.
+        """
+        entry = _parse_price(trade.entry_price_range)
+        if entry <= 0:
+            entry = float(current_price or 0)
+        target = _parse_price(trade.target_price)
+        stop = _parse_price(trade.stop_loss_price)
+        target_pct = float(trade.target_pct or 0)
+        stop_pct = float(trade.stop_loss_pct or 0)
+
+        direction = (trade.direction or "LONG").upper()
+
+        if entry <= 0:
+            logger.debug(f"Trade rejected: no entry price for {trade.ticker}")
+            return None
+
+        # Derive missing price levels from the percentage figures
+        if target <= 0 and target_pct > 0:
+            target = entry * (1 + target_pct / 100)
+        if stop <= 0 and stop_pct > 0:
+            stop = entry * (1 - stop_pct / 100)
+
+        if direction == "LONG":
+            if target <= 0 or stop <= 0:
+                logger.debug(f"Trade rejected: {trade.ticker} missing target/stop levels")
+                return None
+            if target <= entry:
+                logger.warning(f"TRADE REJECTED: {trade.ticker} target {target} <= entry {entry}")
+                return None
+            if stop >= entry:
+                logger.warning(f"TRADE REJECTED: {trade.ticker} stop {stop} >= entry {entry}")
+                return None
+        elif direction == "SHORT":
+            if target <= 0 or stop <= 0:
+                logger.debug(f"Trade rejected: {trade.ticker} missing target/stop levels")
+                return None
+            if target >= entry:
+                logger.warning(f"TRADE REJECTED: {trade.ticker} target {target} >= entry {entry}")
+                return None
+            if stop <= entry:
+                logger.warning(f"TRADE REJECTED: {trade.ticker} stop {stop} <= entry {entry}")
+                return None
+        else:
+            logger.debug(f"Trade rejected: {trade.ticker} direction '{direction}' not executable")
+            return None
+
+        # Percent-based guards (covers cases where the price strings are fuzzy)
+        if target_pct > 0 and (target_pct < 2 or target_pct > 40):
+            logger.debug(f"Trade rejected: {trade.ticker} target_pct {target_pct} out of range")
+            return None
+        if stop_pct <= 0 or stop_pct > 15:
+            logger.debug(f"Trade rejected: {trade.ticker} stop_pct {stop_pct} out of range")
+            return None
+
+        # Risk/reward recomputed from actual price levels. LLMs systematically
+        # overstate R:R (a 12% target with a 6% stop is really ~2x, but typical
+        # 10%/7% plans are ~1.4x). Recompute honestly and reject only the
+        # clearly-broken plans (inverted levels, or < 1.5x on real numbers).
+        risk = entry - stop if direction == "LONG" else stop - entry
+        reward = target - entry if direction == "LONG" else entry - target
+        rr = reward / risk if risk > 0 else 0.0
+        if rr < 1.5:
+            logger.warning(f"TRADE REJECTED: {trade.ticker} recomputed R:R {rr:.2f} < 1.5")
+            return None
+        trade.risk_reward_ratio = round(rr, 2)
+
+        # Thesis sanity check (LLM sometimes emits degenerate text like 'x')
+        thesis = (trade.thesis_one_line or "").strip()
+        if len(thesis) < 3 or thesis.lower() in _GARBAGE_THESIS:
+            logger.warning(f"TRADE REJECTED: {trade.ticker} thesis is garbage: {thesis!r}")
+            return None
+
+        # Normalise numeric levels so the DB stores real numbers (outcomes
+        # depend on a non-zero entry price)
+        trade.entry_price_range = str(round(entry, 2))
+        trade.target_price = str(round(target, 2))
+        trade.stop_loss_price = str(round(stop, 2))
+        if trade.target_pct <= 0:
+            trade.target_pct = round((target - entry) / entry * 100, 1)
+        if trade.stop_loss_pct <= 0:
+            trade.stop_loss_pct = round((entry - stop) / entry * 100, 1)
+
+        return trade
+
+    def _signal_in_cooldown(self, output: Dict, hours: int = 48) -> bool:
+        """True if the same ticker already generated a signal recently."""
+        if not self.db:
+            return False
+        try:
+            ticker = output["trade"]["ticker"]
+            now = datetime.now()
+            for s in self.db.get_recent_signals(days=max(2, hours // 24 + 1)):
+                if s.get("ticker") != ticker:
+                    continue
+                created = s.get("created_at", "")
+                try:
+                    t = datetime.fromisoformat(created)
+                except Exception:
+                    continue
+                if 0 < (now - t).total_seconds() < hours * 3600:
+                    return True
+        except Exception:
+            return False
+        return False
 
     def _format_output(self, trade: TradePlan, triage: TriageResult, article: Dict) -> Dict:
         """Format final output with calibrated confidence"""

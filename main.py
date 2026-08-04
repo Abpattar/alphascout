@@ -50,6 +50,25 @@ def print_banner():
     """)
 
 
+def auto_resolve_outcomes(min_age_days: int = 1, days: int = 30) -> None:
+    """Best-effort outcome resolution (Problem 11). Runs on every pipeline
+    invocation so outcomes accumulate even without a 24/7 scheduler.
+    Never raises — outcome resolution is optional bookkeeping."""
+    try:
+        from scripts.backtest import resolve_outcomes
+        result = resolve_outcomes(days=days, min_age_days=min_age_days)
+        if result.get("resolved", 0):
+            print(f"   ✅ Auto-resolved {result['resolved']} signal outcomes")
+            try:
+                from src.analysis.calibration import get_calibrator
+                get_calibrator().calibrate_from_db()
+                print("   ✅ Recalibrated confidence from new outcomes")
+            except Exception:
+                pass
+    except Exception as e:
+        logging.debug(f"Auto-outcome resolution skipped: {e}")
+
+
 async def run_pipeline(use_cache: bool = True, max_signals: int = 5) -> list:
     """Run the full analysis pipeline"""
     from src.scraping.scraper import scrape_all_sources
@@ -70,6 +89,8 @@ async def run_pipeline(use_cache: bool = True, max_signals: int = 5) -> list:
     if not keys.get("groq"):
         print("\n❌ No Groq API key found! Run setup_credentials.py first")
         return []
+
+    auto_resolve_outcomes()  # Problem 11: keep outcome history fresh (best-effort)
 
     print("\n📡 Scraping news sources...")
     articles = scrape_all_sources(use_cache=use_cache)
@@ -140,6 +161,8 @@ async def run_screener_pipeline(use_cache: bool = True, max_signals: int = 5) ->
     if not keys.get("groq"):
         print("\n❌ No Groq API key found! Run setup_credentials.py first")
         return []
+
+    auto_resolve_outcomes()  # Problem 11: keep outcome history fresh (best-effort)
 
     # Step 1a: Check for price/volume spikes (Problem 4: primary trigger)
     print("\n🔍 Step 1: Scanning for price/volume spikes...")

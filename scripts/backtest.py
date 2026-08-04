@@ -29,8 +29,9 @@ logger = logging.getLogger(__name__)
 DATA_DIR = ROOT / "data"
 
 
-def resolve_outcomes(days: int = 30, batch_size: int = 20) -> Dict:
+def resolve_outcomes(days: int = 30, batch_size: int = 20, min_age_days: int = 1) -> Dict:
     """Fetch actual price outcomes for unresolved signals from yfinance."""
+    from datetime import date
     db = get_db()
     signals = db.get_unresolved_signals(days=days)
 
@@ -52,6 +53,15 @@ def resolve_outcomes(days: int = 30, batch_size: int = 20) -> Dict:
         if not ticker or not entry_price:
             skipped += 1
             continue
+
+        # Skip brand-new signals: there is no meaningful future price data yet
+        # (also avoids a wasted yfinance call for every same-day signal).
+        try:
+            if (date.today() - datetime.fromisoformat(created_at).date()).days < min_age_days:
+                skipped += 1
+                continue
+        except Exception:
+            pass
 
         try:
             t = yf.Ticker(ticker)
