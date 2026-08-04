@@ -423,15 +423,28 @@ class AlphaScoutDB:
             row = cur.fetchone()
             return dict(row) if row else None
 
-    def get_all_outcomes(self, limit: int = 500) -> List[Dict]:
+    def get_all_outcomes(self, limit: int = 500, dedupe: bool = True) -> List[Dict]:
+        """Get outcomes joined with signal info (confidence, created_at, name).
+
+        dedupe=True collapses pre-cooldown duplicates: the same ticker signaled
+        multiple times on the same day (e.g. 5× DEVIT from one run) is the same
+        underlying trade with the same price path. Keep the highest-confidence
+        signal per (ticker, day) so the sample isn't biased by duplicates.
+        """
         with self._cursor() as cur:
             cur.execute(
-                "SELECT * FROM outcomes ORDER BY resolved_at DESC LIMIT ?", (limit,)
+                """SELECT o.*, s.confidence, s.created_at, s.name AS stock_name
+                   FROM outcomes o
+                   LEFT JOIN signals s ON s.signal_id = o.signal_id
+                   ORDER BY o.resolved_at DESC LIMIT ?""",
+                (limit,),
             )
-            return [dict(r) for r in cur.fetchall()]
+            rows = [dict(r) for r in cur.fetchall()]
+        return self._dedupe_by_ticker_day(rows) if dedupe else rows
 
     def get_outcomes_for_calibration(self) -> List[Dict]:
-        """Get signals joined with outcomes for calibration analysis."""
+        """Get signals joined with outcomes for calibration analysis,
+        deduplicated to one representative signal per (ticker, day)."""
         with self._cursor() as cur:
             cur.execute(
                 """SELECT s.signal_id, s.ticker, s.confidence, s.calibrated_confidence,
@@ -443,7 +456,29 @@ class AlphaScoutDB:
                    WHERE o.outcome != 'OPEN'
                    ORDER BY s.created_at"""
             )
-            return [dict(r) for r in cur.fetchall()]
+            rows = [dict(r) for r in cur.fetchall()]
+        return self._dedupe_by_ticker_day(rows)
+
+    @staticmethod
+    def _dedupe_by_ticker_day(rows: List[Dict]) -> List[Dict]:
+        """Collapse same-ticker/same-day signals to one representative: highest
+        confidence, tie-broken by earliest signal_id (creation order)."""
+        best: Dict[tuple, Dict] = {}
+        for r in rows:
+            day = (r.get("created_at") or r.get("resolved_at") or "")[:10]
+            key = (r.get("ticker"), day)
+            cur = best.get(key)
+            if cur is None:
+                best[key] = r
+                continue
+            cur_conf = cur.get("confidence") or 0
+            new_conf = r.get("confidence") or 0
+            if new_conf > cur_conf or (
+                new_conf == cur_conf
+                and (r.get("signal_id") or "") < (cur.get("signal_id") or "")
+            ):
+                best[key] = r
+        return [best[k] for k in sorted(best, key=lambda k: best[k].get("created_at") or "")]
 
     # ─────────────────────────────────────────────────────────────────────
     # STATS

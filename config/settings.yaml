@@ -40,7 +40,7 @@ signals:
   holding_period_max_days: 7
   min_confidence_manual: 70
   min_confidence_auto: 90
-  min_risk_reward_ratio: 2.0
+  min_risk_reward_ratio: 1.5
   max_concurrent_positions: 5
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -132,6 +132,21 @@ tokens:
   impact: 2000
   trade_setup: 2500
   research: 700
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SCREENING (Session 8 backtest winners: price-driven spikes, priority sectors)
+# ─────────────────────────────────────────────────────────────────────────────
+screening:
+  # Volume-only spikes were the worst sub-edge (−0.13R) in the 2y/3y backtest;
+  # price-driven spikes (incl. price+both) were +0.02–0.06R. Cap how many of the
+  # returned candidates may be volume-only so they never crowd out price spikes.
+  volume_only_spike_max_share: 0.25
+  # Sectors with the surviving edge (+0.04R): these rank above other sectors
+  # when spike type ties.
+  priority_sectors:
+    - defence
+    - railways
+    - manufacturing_pli
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TECHNICAL ANALYSIS

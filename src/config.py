@@ -177,6 +177,12 @@ def get_signals_config() -> dict:
     return settings.get("signals", {})
 
 
+def get_screening_config() -> dict:
+    """Get screening trigger settings (Session 8 backtest winners)"""
+    settings = load_settings()
+    return settings.get("screening", {})
+
+
 def get_universe_config() -> dict:
     """Get universe filter settings"""
     settings = load_settings()

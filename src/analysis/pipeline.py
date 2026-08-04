@@ -20,6 +20,7 @@ from src.ai.prompts import (
     build_trade_prompt,
     build_quick_filter_prompt,
 )
+from src.config import get_signals_config
 from src.universe.ticker_map import extract_tickers, resolve_ticker, get_mapper
 
 logger = logging.getLogger(__name__)
@@ -939,12 +940,13 @@ class AnalysisPipeline:
         # Risk/reward recomputed from actual price levels. LLMs systematically
         # overstate R:R (a 12% target with a 6% stop is really ~2x, but typical
         # 10%/7% plans are ~1.4x). Recompute honestly and reject only the
-        # clearly-broken plans (inverted levels, or < 1.5x on real numbers).
+        # clearly-broken plans (inverted levels, or below the configured floor).
         risk = entry - stop if direction == "LONG" else stop - entry
         reward = target - entry if direction == "LONG" else entry - target
         rr = reward / risk if risk > 0 else 0.0
-        if rr < 1.5:
-            logger.warning(f"TRADE REJECTED: {trade.ticker} recomputed R:R {rr:.2f} < 1.5")
+        min_rr = float(get_signals_config().get("min_risk_reward_ratio", 1.5))
+        if rr < min_rr:
+            logger.warning(f"TRADE REJECTED: {trade.ticker} recomputed R:R {rr:.2f} < {min_rr}")
             return None
         trade.risk_reward_ratio = round(rr, 2)
 

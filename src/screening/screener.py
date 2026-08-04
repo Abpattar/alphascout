@@ -7,7 +7,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Set
+from typing import List, Dict, Optional, Set, Any
 from datetime import datetime
 
 import requests
@@ -33,6 +33,8 @@ class ScreenerCandidate:
     source: str
     reason: str  # Why this stock is interesting
     fetched_at: str = ""
+    sector: str = ""   # universe sector slug (defence, railways, ...) when known
+    spike_type: str = ""  # "price" | "volume" | "both" for spike-scan candidates
 
     def to_dict(self) -> dict:
         return {
@@ -45,6 +47,8 @@ class ScreenerCandidate:
             "source": self.source,
             "reason": self.reason,
             "fetched_at": self.fetched_at,
+            "sector": self.sector,
+            "spike_type": self.spike_type,
         }
 
 
@@ -300,18 +304,34 @@ def scan_price_volume_spikes(
     volume_spike_threshold: float = 2.0,
     price_spike_threshold: float = 3.0,
     max_results: int = 20,
+    universe: Optional[Dict[str, Any]] = None,
 ) -> List[ScreenerCandidate]:
     """
     Scan universe stocks for unusual price/volume spikes.
     This should run more frequently (every 15-30 min) as the PRIMARY trigger.
     News scraping becomes secondary confirmation, not the starting point.
-    
+
+    Session 8 backtest winners are wired in here (config `screening:`):
+      - Price-driven spikes (price or price+volume) rank above volume-only
+        spikes, which were the worst sub-edge (−0.13R over 2y/3y).
+      - Volume-only spikes are capped to a share of the results (default 25%)
+        so they never crowd out price spikes in the top-N sent to the LLM.
+      - Priority sectors (defence, railways, manufacturing_pli, +0.04R edge)
+        rank above other sectors when spike type ties.
+
     Args:
         universe_tickers: List of tickers to scan (from universe)
         volume_spike_threshold: How many times average volume = spike (e.g., 2x = spike)
         price_spike_threshold: Min % change to consider a spike
         max_results: Max candidates to return
+        universe: Optional ticker → Stock dict (for sector-based ranking)
     """
+    from src.config import get_screening_config
+
+    sc = get_screening_config()
+    vol_share = float(sc.get("volume_only_spike_max_share", 0.25))
+    priority_sectors = set(sc.get("priority_sectors", ["defence", "railways", "manufacturing_pli"]))
+
     candidates = []
 
     if not universe_tickers:
@@ -365,6 +385,10 @@ def scan_price_volume_spikes(
                     market_cap = info.get("marketCap", 0)
                     market_cap_cr = round(market_cap / 1e7, 1) if market_cap else 0
 
+                    sector = ""
+                    if universe and ticker in universe:
+                        sector = getattr(universe[ticker], "sector", "") or ""
+
                     candidates.append(ScreenerCandidate(
                         ticker=ticker,
                         name=info.get("longName", ticker),
@@ -375,6 +399,9 @@ def scan_price_volume_spikes(
                         source="spike_scan",
                         reason=" | ".join(reasons),
                         fetched_at=datetime.now().isoformat(),
+                        sector=sector,
+                        spike_type="both" if is_price_spike and is_volume_spike else
+                                   ("price" if is_price_spike else "volume"),
                     ))
 
             except Exception as e:
@@ -382,8 +409,25 @@ def scan_price_volume_spikes(
 
         time.sleep(0.3)
 
-    # Sort by spike magnitude
-    candidates.sort(key=lambda c: abs(c.change_pct), reverse=True)
+    # Rank by Session-8 edge: spike type (both > price > volume) first, then
+    # priority-sector boost, then magnitude.
+    def _rank(c):
+        spike_priority = {"both": 3, "price": 2, "volume": 1}.get(c.spike_type, 0)
+        sector_boost = 1 if c.sector in priority_sectors else 0
+        return (spike_priority, sector_boost, abs(c.change_pct))
 
-    logger.info(f"Spike scan: {len(candidates)} stocks with unusual activity")
-    return candidates[:max_results]
+    price_cands = [c for c in candidates if c.spike_type != "volume"]
+    vol_cands = [c for c in candidates if c.spike_type == "volume"]
+
+    if price_cands:
+        price_cands.sort(key=_rank, reverse=True)
+        vol_cands.sort(key=_rank, reverse=True)
+        max_vol = max(0, int(round(max_results * vol_share)))
+        ranked = price_cands + vol_cands[:max_vol]
+    else:
+        # No price movement anywhere: keep volume signals rather than returning
+        # nothing, but order them by the same ranking.
+        ranked = sorted(candidates, key=_rank, reverse=True)
+
+    logger.info(f"Spike scan: {len(ranked)} stocks with unusual activity")
+    return ranked[:max_results]

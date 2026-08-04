@@ -205,10 +205,15 @@ def show_results() -> Dict:
     """Display backtest results from stored outcomes."""
     db = get_db()
     outcomes = db.get_all_outcomes(limit=1000)
+    raw_total = len(db.get_all_outcomes(limit=1000, dedupe=False))
 
     if not outcomes:
         print("\nNo outcomes stored yet. Run 'resolve' first to fetch price data.")
         return {}
+
+    if raw_total != len(outcomes):
+        print(f"\nℹ️  Collapsed {raw_total - len(outcomes)} same-ticker/same-day duplicates "
+              f"({raw_total} raw → {len(outcomes)} independent signals)")
 
     # Compute metrics
     total = len(outcomes)

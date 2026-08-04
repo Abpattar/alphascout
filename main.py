@@ -168,7 +168,7 @@ async def run_screener_pipeline(use_cache: bool = True, max_signals: int = 5) ->
     print("\n🔍 Step 1: Scanning for price/volume spikes...")
     universe = get_universe()
     universe_tickers = list(universe.keys())
-    spike_candidates = scan_price_volume_spikes(universe_tickers, max_results=15)
+    spike_candidates = scan_price_volume_spikes(universe_tickers, max_results=15, universe=universe)
     print(f"   Found {len(spike_candidates)} stocks with unusual activity")
 
     # Step 1b: Also scan NSE gainers / Screener.in / Trendlyne

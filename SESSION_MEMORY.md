@@ -22,9 +22,16 @@
 6. ✅ **Auto-resolution on every run** — `main.py::auto_resolve_outcomes()` now calls `resolve_outcomes` + recalibrates at the start of `run_pipeline()` and `run_screener_pipeline()` (best-effort, never raises, min_age 1 day). Outcomes now accumulate even without a 24/7 scheduler.
 7. ✅ **Calibration now real-data driven** — `python main.py calibrate`: 60-69 bucket (12 sigs) → 25%→calibrated 30%; 70-79 (4 sigs) → 0%→30% floor. Auto-execute effectively gated off (no bucket reaches 80%).
 
+### Session 10 follow-up fixes (same day) — cleaned up before new work
+1. ✅ **Wired Session-8 backtest winners into the live screener** (`src/screening/screener.py::scan_price_volume_spikes`): price-driven spikes (both > price > volume) rank first; volume-only spikes capped to `screening.volume_only_spike_max_share` (25%) so they can't crowd out price spikes; priority sectors (`defence`, `railways`, `manufacturing_pli`) tie-break. `ScreenerCandidate` gained `sector` + `spike_type`; `main.py` now passes `universe` for sector lookup. Config in `config/settings.yaml` (`screening:`) + `src/config.py::get_screening_config()`.
+2. ✅ **Deduplicated outcomes before calibration/results** (`src/storage/db.py`): `get_all_outcomes()` and `get_outcomes_for_calibration()` now collapse same-ticker/same-day signals (highest confidence, tie-break earliest) — 16 raw → 10 independent signals. `show_results` prints the collapse count. Prevents pre-cooldown duplicates (5× DEVIT, 4× APOLLO, 3× IDEAFORGE) biasing win-rate/calibration.
+3. ✅ **Wired `signals.min_risk_reward_ratio` config** into `_validate_trade_plan` (was a dead config; code hardcoded 1.5). Value set to **1.5** in `config/settings.yaml` (was misleading 2.0 — an honest 10%/7% plan is ~1.4–1.6x, 2.0 would starve the pipeline).
+- **Current honest numbers (deduped, 10 signals):** win rate 20% (2W/2L/6H), expectancy −3.60%, PF 0.78. Calibration: 60-69 bucket 33% win → calibrated 33%; 70-79 (4 sigs) 0% → 30% floor. Auto-execute remains gated off.
+- Known cosmetic quirk (not fixed): calibration report buckets floor at 60 (50-conf signals land in "60-69") while `show_results` buckets by decile — pre-existing, display-only.
+
 ### Caveat
-- Calibration/backtest counts duplicate signals of the same underlying trade (5× DEVIT, 4× APOLLO, 3× IDEAFORGE pre-cooldown). Cooldown prevents future duplicates but existing ones bias buckets; treat the numbers as directional, not precise.
-- 11/16 outcomes are HOLD (never hit target or stop within horizon) — win rate counts them as non-wins.
+- Calibration and backtest results now dedupe same-ticker/same-day signals (Session 10 follow-up #2); raw outcome rows still exist in the DB but aggregates use the deduped set (16 → 10).
+- 11/16 raw (6/10 deduped) outcomes are HOLD (never hit target or stop within horizon) — win rate counts them as non-wins.
 
 ### Suggested next steps (continue here)
 1. Wire Session-8 backtest winners (price-only spikes, defence/railways) into the live screener as filters.
@@ -398,6 +405,13 @@ python -c "from src.universe.builder import get_universe; u = get_universe(); pr
 ---
 
 ## Key Files Modified
+
+### Session 10 follow-up — screener winners + dedupe + R:R config
+- `src/screening/screener.py` — `scan_price_volume_spikes` Session-8 edge ranking (both > price > volume, priority sectors, volume-only cap), `ScreenerCandidate.sector`/`spike_type`
+- `src/storage/db.py` — `get_all_outcomes(dedupe=True)` + `get_outcomes_for_calibration()` dedupe by (ticker, day) via `_dedupe_by_ticker_day`
+- `src/config.py` — `get_screening_config()`; `config/settings.yaml` — `screening:` block, `signals.min_risk_reward_ratio: 1.5`
+- `src/analysis/pipeline.py` — `_validate_trade_plan` reads `min_risk_reward_ratio` from config
+- `main.py` — passes `universe` to spike scan; `scripts/backtest.py` — shows dedupe collapse count
 
 ### Session 10 — Trade-plan validation + outcome resolution + auto-resolve
 - `src/analysis/pipeline.py` — `_parse_price()`, `_GARBAGE_THESIS`, `_NON_STOCK_ENTITIES`, `_validate_trade_plan()` (inverted/degenerate plan rejection, honest R:R ≥1.5, thesis guard, level normalisation), `_signal_in_cooldown()` (48h per-ticker), non-stock entity guard in `_analyze_impact`, validation wired into `_create_trade`
