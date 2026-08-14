@@ -207,6 +207,17 @@ def get_research_config() -> dict:
     return settings.get("research", {})
 
 
+def get_holdings_config() -> dict:
+    """Get manual-holdings reminder settings (Telegram buy/sell tracking)."""
+    settings = load_settings()
+    return settings.get("holdings", {
+        "reminder_days": [7, 30],
+        "nudges_per_day": 2,
+        "patience_days": 30,
+        "extend_days": 30,
+    })
+
+
 # For backward compatibility
 __all__ = [
     "load_settings",
@@ -230,4 +241,5 @@ __all__ = [
     "get_technical_config",
     "get_schedule_config",
     "get_research_config",
+    "get_holdings_config",
 ]

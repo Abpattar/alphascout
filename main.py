@@ -352,7 +352,7 @@ async def run_spike_mini():
     print_run_stats()
 
 
-def run_scheduler():
+async def run_scheduler():
     """Run 2x daily scheduler with intra-day spike scanning (Issue 2) and auto-outcome resolution (Problem 11)"""
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.cron import CronTrigger
@@ -398,6 +398,19 @@ def run_scheduler():
         except Exception as e:
             print(f"   Outcome resolution failed: {e}")
 
+    async def scheduled_reminders():
+        """Holdings: send sell reminders for due manual positions."""
+        try:
+            from src.portfolio.bot import run_reminder_check
+            await run_reminder_check()
+        except Exception as e:
+            print(f"   Reminder check failed: {e}")
+
+    async def bot_poll_loop():
+        """Holdings: listen for Telegram button presses (I Bought It / I Sold It)."""
+        from src.portfolio.bot import poll_updates
+        await poll_updates()
+
     # 6:30 AM and 4:30 PM IST — main runs
     scheduler.add_job(scheduled_run, CronTrigger(hour=6, minute=30, timezone="Asia/Kolkata"))
     scheduler.add_job(scheduled_run, CronTrigger(hour=16, minute=30, timezone="Asia/Kolkata"))
@@ -413,16 +426,33 @@ def run_scheduler():
     # Problem 11: Auto-check outcomes at 9:30 AM IST (after market opens, check previous signals)
     scheduler.add_job(scheduled_resolve_outcomes, CronTrigger(hour=9, minute=30, timezone="Asia/Kolkata"))
 
+    # Holdings: sell reminders every 30 min during the day (deduped by holdings config:
+    # at most `nudges_per_day` messages per due day, on reminder_days [7, 30])
+    scheduler.add_job(
+        scheduled_reminders,
+        CronTrigger(hour="8-18", minute="0,30", timezone="Asia/Kolkata"),
+        id="holdings_reminders",
+        name="Holdings sell reminders",
+    )
+
     scheduler.start()
+
+    # Start the Telegram button-listening loop on the running event loop
+    loop = asyncio.get_running_loop()
+    poll_task = loop.create_task(bot_poll_loop())
+
     print("\n⏰ Scheduler started:")
     print("   Main runs: 6:30 AM & 4:30 PM IST")
     print(f"   Spike scan: every {spike_interval} min during market hours (9:15 AM – 3:30 PM IST)")
     print("   Auto-outcome resolution: 9:30 AM IST (Problem 11)")
+    print("   Holdings reminders: sell nudges on days 7 & 30 (manual buy/sell tracking)")
+    print("   Telegram buttons: 'I Bought It' / 'I Sold It' listening 24/7 while running")
     print("   Press Ctrl+C to stop\n")
 
     try:
-        asyncio.get_event_loop().run_forever()
-    except KeyboardInterrupt:
+        await asyncio.Event().wait()  # block forever; scheduler + poll run in background
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        poll_task.cancel()
         scheduler.shutdown()
         print("\n👋 Scheduler stopped")
 
@@ -432,7 +462,7 @@ async def main():
 
     parser = argparse.ArgumentParser(description="AlphaScout - News to Trade Signal Bot")
     parser.add_argument("command", nargs="?", default="run",
-                        choices=["run", "scan", "scheduler", "backtest", "portfolio", "config", "test", "db", "calibrate"],
+                        choices=["run", "scan", "scheduler", "backtest", "portfolio", "config", "test", "db", "calibrate", "holds"],
                         help="Command to execute")
     parser.add_argument("--cache", action="store_true", default=True,
                         help="Use cached articles")
@@ -475,7 +505,7 @@ async def main():
         await run_screener_pipeline(use_cache=args.cache, max_signals=args.signals)
 
     elif args.command == "scheduler":
-        run_scheduler()
+        await run_scheduler()
 
     elif args.command == "backtest":
         # Problem 6: Actually run backtest — resolve outcomes first, then show results
@@ -538,6 +568,8 @@ async def main():
         print(f"   Wins:                 {stats['wins']}")
         print(f"   Losses:               {stats['losses']}")
         print(f"   Win rate:             {stats['win_rate']}%")
+        print(f"   Holds open:           {stats['holdings_open']}")
+        print(f"   Holds sold:           {stats['holdings_sold']}")
         print(f"\n   DB path: {db.db_path}")
 
         unresolved = db.get_unresolved_signals(days=14)
@@ -552,6 +584,24 @@ async def main():
         print("\n🔄 Recalibrating from stored outcomes...")
         calibrator.calibrate_from_db()
         print(calibrator.get_calibration_report())
+
+    elif args.command == "holds":
+        from src.storage.db import get_db
+        db = get_db()
+        print("\n📌 CURRENT HOLDS (manual buy/sell tracking):")
+        holdings = db.get_holdings("HOLDING")
+        if not holdings:
+            print("   📭 None")
+        for h in holdings:
+            print(f"   {h['name']} ({h['ticker']}) | ₹{h['entry_price']:,.2f} x {h['quantity']} "
+                  f"| bought {h['buy_date']} | sell-due {h['sell_due_date']} | patience {h['patience_deadline']}")
+        sold = db.get_holdings("SOLD")
+        if sold:
+            print("\n   💸 SOLD HISTORY:")
+            for h in sold:
+                print(f"   {h['name']} ({h['ticker']}) | bought {h['buy_date']} @ ₹{h['entry_price']:,.2f} "
+                      f"| sold {h['sell_date']} @ ₹{h['sell_price']:,.2f} "
+                      f"| P&L {h['pnl']:+,.0f} ({h['pnl_pct']:+.1f}%) | {h['exit_reason']}")
 
 
 if __name__ == "__main__":

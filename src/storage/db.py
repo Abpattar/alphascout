@@ -96,6 +96,29 @@ CREATE TABLE IF NOT EXISTS outcomes (
     metadata        TEXT DEFAULT '{}'
 );
 
+CREATE TABLE IF NOT EXISTS holdings (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_id          TEXT NOT NULL,
+    ticker             TEXT NOT NULL,
+    name               TEXT DEFAULT '',
+    entry_price        REAL DEFAULT 0,
+    quantity           INTEGER DEFAULT 1,
+    target_price       REAL DEFAULT 0,
+    stop_price         REAL DEFAULT 0,
+    buy_date           TEXT NOT NULL,
+    sell_due_date      TEXT NOT NULL,
+    patience_deadline  TEXT NOT NULL,
+    status             TEXT DEFAULT 'HOLDING',
+    last_reminded      TEXT DEFAULT '',
+    nudges_today       INTEGER DEFAULT 0,
+    sell_date          TEXT,
+    sell_price         REAL,
+    exit_reason        TEXT DEFAULT '',
+    pnl                REAL DEFAULT 0,
+    pnl_pct            REAL DEFAULT 0,
+    created_at         TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_articles_url ON raw_articles(url);
 CREATE INDEX IF NOT EXISTS idx_articles_source ON raw_articles(source);
 CREATE INDEX IF NOT EXISTS idx_articles_scraped ON raw_articles(scraped_at);
@@ -107,6 +130,8 @@ CREATE INDEX IF NOT EXISTS idx_signals_executed ON signals(executed);
 CREATE INDEX IF NOT EXISTS idx_outcomes_signal ON outcomes(signal_id);
 CREATE INDEX IF NOT EXISTS idx_outcomes_ticker ON outcomes(ticker);
 CREATE INDEX IF NOT EXISTS idx_outcomes_outcome ON outcomes(outcome);
+CREATE INDEX IF NOT EXISTS idx_holdings_status ON holdings(status);
+CREATE INDEX IF NOT EXISTS idx_holdings_ticker ON holdings(ticker);
 """
 
 
@@ -481,6 +506,111 @@ class AlphaScoutDB:
         return [best[k] for k in sorted(best, key=lambda k: best[k].get("created_at") or "")]
 
     # ─────────────────────────────────────────────────────────────────────
+    # HOLDINGS (manual buy/sell tracking from Telegram buttons)
+    # ─────────────────────────────────────────────────────────────────────
+
+    def store_holding(self, holding: Dict) -> Optional[int]:
+        """Store a manually-confirmed buy. Returns holding id, or None on error."""
+        try:
+            with self._cursor() as cur:
+                cur.execute(
+                    """INSERT INTO holdings
+                       (signal_id, ticker, name, entry_price, quantity,
+                        target_price, stop_price, buy_date, sell_due_date,
+                        patience_deadline, status, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'HOLDING', ?)""",
+                    (
+                        holding["signal_id"],
+                        holding["ticker"],
+                        holding.get("name", ""),
+                        holding.get("entry_price", 0),
+                        holding.get("quantity", 1),
+                        holding.get("target_price", 0),
+                        holding.get("stop_price", 0),
+                        holding["buy_date"],
+                        holding["sell_due_date"],
+                        holding["patience_deadline"],
+                        holding.get("created_at", datetime.now().isoformat()),
+                    ),
+                )
+                return cur.lastrowid
+        except Exception as e:
+            logger.warning(f"store_holding failed: {e}")
+            return None
+
+    def get_holdings(self, status: str = "HOLDING") -> List[Dict]:
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT * FROM holdings WHERE status = ? ORDER BY buy_date ASC",
+                (status,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+    def get_holding(self, holding_id: int) -> Optional[Dict]:
+        with self._cursor() as cur:
+            cur.execute("SELECT * FROM holdings WHERE id = ?", (holding_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+    def get_holding_by_signal(self, signal_id: str) -> Optional[Dict]:
+        with self._cursor() as cur:
+            cur.execute(
+                """SELECT * FROM holdings
+                   WHERE signal_id = ? AND status = 'HOLDING'
+                   ORDER BY id DESC LIMIT 1""",
+                (signal_id,),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+    def mark_holding_sold(self, holding_id: int, sell_price: float,
+                          sell_date: str, exit_reason: str = "MANUAL") -> Optional[Dict]:
+        """Mark a holding as sold. Returns computed P&L dict, or None."""
+        with self._cursor() as cur:
+            cur.execute("SELECT * FROM holdings WHERE id = ?", (holding_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            entry = row["entry_price"] or 1.0
+            qty = row["quantity"] or 1
+            pnl = (sell_price - entry) * qty
+            pnl_pct = (sell_price - entry) / entry * 100
+            cur.execute(
+                """UPDATE holdings SET status='SOLD', sell_price=?, sell_date=?,
+                   exit_reason=?, pnl=?, pnl_pct=? WHERE id=?""",
+                (sell_price, sell_date, exit_reason, pnl, pnl_pct, holding_id),
+            )
+            return {"pnl": pnl, "pnl_pct": pnl_pct}
+
+    def extend_holding(self, holding_id: int, new_deadline: str):
+        """Extend the patience deadline (user pressed 'Still Holding')."""
+        with self._cursor() as cur:
+            cur.execute(
+                """UPDATE holdings SET patience_deadline=?, last_reminded='',
+                   nudges_today=0 WHERE id=?""",
+                (new_deadline, holding_id),
+            )
+
+    def mark_holding_reminded(self, holding_id: int, today: str, nudges_today: int):
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE holdings SET last_reminded=?, nudges_today=? WHERE id=?",
+                (today, nudges_today, holding_id),
+            )
+
+    def reset_holdings_nudges(self, today: str):
+        """Reset nudges_today to 0 for holdings reminded on an earlier day."""
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE holdings SET nudges_today=0 WHERE last_reminded != ?",
+                (today,),
+            )
+
+    def delete_holding(self, holding_id: int):
+        with self._cursor() as cur:
+            cur.execute("DELETE FROM holdings WHERE id = ?", (holding_id,))
+
+    # ─────────────────────────────────────────────────────────────────────
     # STATS
     # ─────────────────────────────────────────────────────────────────────
 
@@ -505,6 +635,12 @@ class AlphaScoutDB:
 
             cur.execute("SELECT COUNT(*) as cnt FROM outcomes WHERE outcome = 'LOSS'")
             stats["losses"] = cur.fetchone()["cnt"]
+
+            cur.execute("SELECT COUNT(*) as cnt FROM holdings WHERE status = 'HOLDING'")
+            stats["holdings_open"] = cur.fetchone()["cnt"]
+
+            cur.execute("SELECT COUNT(*) as cnt FROM holdings WHERE status = 'SOLD'")
+            stats["holdings_sold"] = cur.fetchone()["cnt"]
 
             if stats["wins"] + stats["losses"] > 0:
                 stats["win_rate"] = round(

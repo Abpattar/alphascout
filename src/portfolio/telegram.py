@@ -8,7 +8,7 @@ import json
 import logging
 import asyncio
 import ssl
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 
 import aiohttp
 
@@ -52,8 +52,10 @@ def _validate_recipient(chat_id: int) -> bool:
     return True
 
 
-async def send_message(text: str, parse_mode: str = "HTML", chat_id: int = None) -> bool:
-    """Send message to Telegram. Issue 3: enforces single-recipient in personal_use_only mode."""
+async def send_message(text: str, parse_mode: str = "HTML", chat_id: int = None,
+                       reply_markup: Optional[dict] = None) -> bool:
+    """Send message to Telegram. Issue 3: enforces single-recipient in personal_use_only mode.
+    reply_markup: inline keyboard dict (e.g. {"inline_keyboard": [...]})."""
     target_chat = chat_id or CHAT_ID
     if not BOT_TOKEN or not target_chat:
         logger.warning("Telegram not configured — BOT_TOKEN or CHAT_ID missing")
@@ -63,11 +65,15 @@ async def send_message(text: str, parse_mode: str = "HTML", chat_id: int = None)
     if not _validate_recipient(target_chat):
         return False
 
+    payload = {"chat_id": target_chat, "text": text, "parse_mode": parse_mode}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 f"{BASE_URL}/sendMessage",
-                json={"chat_id": target_chat, "text": text, "parse_mode": parse_mode},
+                json=payload,
                 timeout=aiohttp.ClientTimeout(total=15),
                 ssl=SSL_CTX
             ) as resp:
@@ -83,6 +89,53 @@ async def send_message(text: str, parse_mode: str = "HTML", chat_id: int = None)
         return False
     except Exception as e:
         logger.error(f"Telegram send failed: {e}")
+        return False
+
+
+def make_inline_keyboard(rows: List[List[dict]]) -> dict:
+    """Build an inline keyboard payload from [row][button] dicts like
+    {'text': '...', 'callback_data': '...'}."""
+    return {"inline_keyboard": rows}
+
+
+async def answer_callback_query(callback_query_id: str, text: str = "") -> bool:
+    """Acknowledge a button press (stops Telegram's loading spinner)."""
+    if not BOT_TOKEN:
+        return False
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{BASE_URL}/answerCallbackQuery",
+                json={"callback_query_id": callback_query_id, "text": text},
+                timeout=aiohttp.ClientTimeout(total=15),
+                ssl=SSL_CTX
+            ) as resp:
+                return resp.status == 200
+    except Exception as e:
+        logger.error(f"answerCallbackQuery failed: {e}")
+        return False
+
+
+async def edit_message_reply_markup(chat_id: int, message_id: int,
+                                    reply_markup: Optional[dict] = None) -> bool:
+    """Replace the buttons on an existing message (pass None to remove them)."""
+    if not BOT_TOKEN:
+        return False
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{BASE_URL}/editMessageReplyMarkup",
+                json={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "reply_markup": reply_markup or {"inline_keyboard": []},
+                },
+                timeout=aiohttp.ClientTimeout(total=15),
+                ssl=SSL_CTX
+            ) as resp:
+                return resp.status == 200
+    except Exception as e:
+        logger.error(f"editMessageReplyMarkup failed: {e}")
         return False
 
 
@@ -149,8 +202,15 @@ def format_portfolio_update(positions: Dict) -> str:
 
 
 async def send_signal(signal: Dict) -> bool:
-    """Send trade signal"""
-    return await send_message(format_signal(signal))
+    """Send trade signal with 'I Bought It' / 'Skip' action buttons."""
+    signal_id = signal.get("signal_id", "")
+    reply_markup = None
+    if signal_id:
+        reply_markup = make_inline_keyboard([
+            [{"text": "✅ I Bought It", "callback_data": f"bought:{signal_id}"}],
+            [{"text": "🙅 Skip", "callback_data": f"skip:{signal_id}"}],
+        ])
+    return await send_message(format_signal(signal), reply_markup=reply_markup)
 
 
 async def send_portfolio(positions: Dict) -> bool:

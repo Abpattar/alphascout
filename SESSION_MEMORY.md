@@ -1,6 +1,39 @@
 # AlphaScout Session Memory
-**Last Updated:** 2026-08-04 (Session 10)
-**Project Root:** `D:\Codes\alphascout`
+**Last Updated:** 2026-08-10 (Session 11)
+**Project Root:** `/home/neo/Codes/alphascout` (Linux; was `D:\Codes\alphascout` on Windows)
+
+---
+
+## Session 11 (2026-08-10) — Manual Buy/Sell Tracker + Reminders + LLM Budget Scale-Up
+
+### What we did
+1. ✅ **Repo sync + environment move** — machine is now Linux (`/home/neo/Codes/alphascout`, `venv/bin/python` = Python 3.12). Local folder was ~13 commits / ~5,400 lines behind GitHub; synced to `main` (commit `c4d5569`, Sessions 7–10 all present). Stale caches deleted (`articles_cache.json`, `universe_cache.json`, `backtest_20260719.json`); `data/.credentials/` kept.
+2. ✅ **Strategy decision (user): MANUAL trading, no auto-execute** — user buys/sells in their own broker; the bot only *sends signals* with Telegram buttons. No Zerodha/Kite (still ❌ in key checks, by design). No cloud hosting for now — buttons/reminders only work while `python main.py scheduler` runs on this PC.
+3. ✅ **Built the holdings / reminder system** (all files tested end-to-end):
+   - `src/storage/db.py` — new `holdings` table + CRUD: `store_holding`, `get_holdings`, `get_holding`, `get_holding_by_signal`, `mark_holding_sold` (computes pnl/pnl_pct), `extend_holding`, `mark_holding_reminded`, `reset_holdings_nudges`, `delete_holding`. Stats now include `holdings_open` / `holdings_sold`.
+   - `src/portfolio/telegram.py` — `send_message` gains `reply_markup`; new `make_inline_keyboard`, `answer_callback_query`, `edit_message_reply_markup`; `send_signal` attaches `bought:{signal_id}` / `skip:{signal_id}` buttons.
+   - `src/portfolio/bot.py` (**NEW**) — long-polling `poll_updates()` (offset-based, 25s timeout), callback handlers (`bought:`/`skip:`/`sold:`/`extend:`), pending-input state machine (buy price → qty; sell price), `run_reminder_check()` (fires only on `reminder_days`, max `nudges_per_day`, deduped by date), `fetch_current_price()` via yfinance, `_send_holdings_list` for `/holds`.
+   - `src/config.py` — `get_holdings_config()`; `config/settings.yaml` — `holdings:` block: `reminder_days: [7, 30]`, `nudges_per_day: 2`, `patience_days: 30`, `extend_days: 30`.
+   - `main.py` — `scheduled_reminders()` + `bot_poll_loop()` jobs; `holds` CLI command; `run_scheduler` rewritten to `async def` + `await asyncio.Event().wait()` (old `asyncio.get_event_loop().run_forever()` crashed with "This event loop is already running").
+   - Fixed `CronTrigger` bug: `minute=[0,30]` → `minute="0,30"` (list of ints crashed APScheduler).
+4. ✅ **End-to-end tests passed**: buy flow via real signal (stored with sell_due +7d, patience +30d), reminder fired with live price ₹823 + P&L, dedupe caps at 2 nudges/day, sell flow recorded +₹820/+9.9%. All test rows cleaned up. `py_compile` clean; scheduler boots 5 jobs + polling.
+5. ✅ **LLM budget scaled for 8 Groq keys** (`config/settings.yaml` → `llm_budget:`): daily_token_budget 120K → **1.5M**, daily_call_budget 300 → **1500**, per_run_token_budget 40K → **300K**, per_run_call_budget 80 → **400**. NOTE: per-run values are loaded but NOT enforced in `_check_budget()` (only daily `calls`/`tokens` are checked) — per-run is aspirational.
+6. ✅ **Budget mechanics learned**: stats persist in `data/daily_llm_stats.json`; reset happens automatically on date rollover (keyed by `%Y-%m-%d`); **deleting the file resets manually** (did this today). Token accounting uses `_record_call(estimated_tokens=max_tokens)` — successful calls count the stage's `max_tokens` (up to 2500), failures/rate-limits count 700. A full run ≈ 60–70 calls ≈ ~120K est tokens. Budget exhaustion raises `BudgetExhaustedError` → all articles "fail" → 0 signals (NOT a scraping problem).
+
+### Current state
+- 4 unresolved signals in DB from today's first live run: CUPID.NS 76%, AARTIPHARM.NS 80%, UTLSOLAR.BO 50%, CYIENT.NS 61% (3 delivered to Telegram).
+- LLM budget reset + raised — ready for more runs.
+- **Working tree NOT committed** (holdings feature + budget bump) — pending user's "say the word".
+
+### Caveat
+- Reminders/buttons are best-effort: only fire while the scheduler process is running. 3rd-party price fetch (yfinance) can fail on market-holiday/after-hours timings — handled gracefully.
+- The 8 Groq keys (rate limits) are the effective ceiling now, not the daily budget.
+
+### Suggested next steps (continue here)
+1. Commit + push Session 11 changes (ask user first).
+2. Run `venv/bin/python main.py run --signals 5` to confirm signals flow again after budget reset.
+3. Keep scheduler running (`python main.py scheduler`) so buttons + reminders work; test the full buy→7d→30d lifecycle with a real holding.
+4. Let signals accumulate → outcome resolution (auto-runs with every `run`/`scan`) → real accuracy numbers.
 
 ---
 
@@ -324,7 +357,7 @@ HINDPETRO.NS, INDUSINDBK.NS
 ---
 
 ## API Keys (All in .env)
-- ✅ Groq (5 keys) — main AI provider
+- ✅ Groq (8 keys) — main AI provider
 - ✅ OpenRouter — backup
 - ✅ Cerebras — backup
 - ✅ Gemini — backup
@@ -405,6 +438,13 @@ python -c "from src.universe.builder import get_universe; u = get_universe(); pr
 ---
 
 ## Key Files Modified
+
+### Session 11 — Manual holdings tracker + reminders + budget scale-up
+- `src/portfolio/bot.py` — **NEW** — Telegram long-polling, inline button callbacks, pending-input state machine, `run_reminder_check()`, `_send_holdings_list`, `fetch_current_price()`
+- `src/portfolio/telegram.py` — `reply_markup` support, `make_inline_keyboard`, `answer_callback_query`, `edit_message_reply_markup`, signal buy/skip buttons
+- `src/storage/db.py` — `holdings` table + full CRUD (`store_holding`, `mark_holding_sold`, `extend_holding`, `mark_holding_reminded`, `reset_holdings_nudges`, …), holdings in stats
+- `src/config.py` — `get_holdings_config()`; `config/settings.yaml` — `holdings:` block + `llm_budget:` raised (1.5M tokens / 1500 calls)
+- `main.py` — `scheduled_reminders()` + `bot_poll_loop()` scheduler jobs, `holds` command, async `run_scheduler` fix, CronTrigger `minute="0,30"` fix
 
 ### Session 10 follow-up — screener winners + dedupe + R:R config
 - `src/screening/screener.py` — `scan_price_volume_spikes` Session-8 edge ranking (both > price > volume, priority sectors, volume-only cap), `ScreenerCandidate.sector`/`spike_type`

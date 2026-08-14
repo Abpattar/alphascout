@@ -107,10 +107,10 @@ ensemble:
 # Tokens are estimated (calls × 700 avg). Calls are absolute.
 # ─────────────────────────────────────────────────────────────────────────────
 llm_budget:
-  daily_token_budget: 120000   # ~100K Groq free-tier + buffer for other providers
-  daily_call_budget: 300       # absolute max LLM calls per day
-  per_run_token_budget: 40000  # max tokens per single pipeline run
-  per_run_call_budget: 80      # max LLM calls per single pipeline run
+  daily_token_budget: 1500000  # 8× Groq keys (~1.5M est tokens ≈ 10 full runs)
+  daily_call_budget: 1500      # absolute max LLM calls per day
+  per_run_token_budget: 300000 # max tokens per single pipeline run
+  per_run_call_budget: 400     # max LLM calls per single pipeline run
 
 # ─────────────────────────────────────────────────────────────────────────────
 # WEB RESEARCH (company-less catalyst news)
@@ -178,3 +178,14 @@ scraping:
     - "Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0"
   dedupe_threshold: 0.85
   enrich_top_n: 15
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MANUAL HOLDINGS (Telegram buy/sell tracking + reminders)
+# The bot never trades by itself — the user presses "I Bought It" on a signal,
+# and the bot reminds them to sell on reminder_days. Holding is manual-only.
+# ─────────────────────────────────────────────────────────────────────────────
+holdings:
+  reminder_days: [7, 30]    # days after buy when reminders fire
+  nudges_per_day: 2         # max reminder messages per due day
+  patience_days: 30         # default "hold longer" deadline
+  extend_days: 30           # how many days "Still Holding" adds
