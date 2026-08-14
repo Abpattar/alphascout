@@ -14,16 +14,19 @@
    - **Usage**: 84 LLM calls / ~58.8K est tokens — only 6% of the new daily budget (1416 calls left, 1.34M tokens left). No budget issues; rate limits (8 Groq keys) remain the real ceiling.
    - Pipeline discipline held: 3 trades rejected on honest R:R < 1.5 (IDEAFORGE, APOLLO, PGEL, DEVIT), TATATECH name/ticker mismatch guard fired again, circuit-risk penalty on IDEAFORGE, non-Yahoo stocks (PARASDEF, ZENTEC, BHARATFORG, WABCO, DIXON) correctly discarded.
    - Only 3 LLM errors across 84 calls (1 cerebras, 1 gemini timeout, 1 openrouter JSON-parse — all gracefully retried/absorbed).
+3. ✅ **SPEED: article parallelism 3 → 6 workers** (user complaint: 17-min runs, too slow). `config/settings.yaml` → new `pipeline:` block (`max_workers: 6`, `process_multiplier: 4`); `src/config.py::get_pipeline_config()`; `src/analysis/pipeline.py::__init__` reads it and both `analyze_batch` + `analyze_screener_candidates` use `self._max_workers` / `self._process_multiplier` (was hardcoded `3`). Expect ~2-3x faster (~5-8 min/run) with 8 Groq keys + 3 other providers.
+4. ✅ **Thread-safe budget counters** — `ProviderRegistry._check_budget`/`_record_call` now guarded by `self._stats_lock` (lost-update risk with concurrent workers).
+5. ✅ **Quality gates UNCHANGED** (user decision) — honest R:R ≥ 1.5 floor kept at 1.5 despite 4 rejections today; the speed change alone is the fix.
 
 ### Current state
 - 6 signals in DB (2 today), 4 outcomes (2 WIN / 2 HOLD), 0 holdings, all committed & pushed.
-- LLM budget: 1.5M tokens / 1500 calls/day (new).
-- DB stats show first real accuracy data (4 resolved outcomes).
+- Working tree: Session 12 speed change + memory update UNCOMMITTED (pending user's "say the word").
+- LLM budget: 1.5M tokens / 1500 calls/day (new); 83 calls / ~155.7K tokens used today.
 
 ### Suggested next steps (continue here)
-1. Keep the scheduler running (`python main.py scheduler`) so buttons/reminders work; test the buy→7d→30d lifecycle on a real holding via Telegram.
-2. Let today's signals (JTEKTINDIA.NS, PRAJIND.NS) age past 1 day → auto-resolve on next run → win rate/calibration updates.
-3. As outcomes accumulate, re-check calibration buckets (calibrate command) — current data still sparse (4 outcomes).
+1. Verify speed: rerun `main.py run --signals 5` and confirm ~2x faster with no rate-limit storm at 6 workers.
+2. Keep the scheduler running (`python main.py scheduler`) so buttons/reminders work; test the buy→7d→30d lifecycle on a real holding via Telegram.
+3. Let today's signals (JTEKTINDIA.NS, PRAJIND.NS) age past 1 day → auto-resolve on next run → win rate/calibration updates.
 
 ---
 

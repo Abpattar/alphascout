@@ -218,6 +218,15 @@ def get_holdings_config() -> dict:
     })
 
 
+def get_pipeline_config() -> dict:
+    """Get pipeline execution settings (parallelism, article cap)."""
+    settings = load_settings()
+    return settings.get("pipeline", {
+        "max_workers": 3,
+        "process_multiplier": 3,
+    })
+
+
 # For backward compatibility
 __all__ = [
     "load_settings",
@@ -242,4 +251,5 @@ __all__ = [
     "get_schedule_config",
     "get_research_config",
     "get_holdings_config",
+    "get_pipeline_config",
 ]

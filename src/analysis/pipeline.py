@@ -324,6 +324,10 @@ class AnalysisPipeline:
         self.mapper = get_mapper()
         self._db = None
         self._base_universe = set(self.mapper.universe.keys())
+        from src.config import get_pipeline_config
+        self._pipe_cfg = get_pipeline_config()
+        self._max_workers = int(self._pipe_cfg.get("max_workers", 3))
+        self._process_multiplier = int(self._pipe_cfg.get("process_multiplier", 3))
 
     @property
     def db(self):
@@ -1141,10 +1145,10 @@ class AnalysisPipeline:
         signals = []
         failed = 0
         budget_hit = False
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
             future_to_article = {
                 executor.submit(self.analyze_article, article): article 
-                for article in filtered_articles[:max_signals * 3]  # Process 3x to account for failures
+                for article in filtered_articles[:max_signals * self._process_multiplier]  # Process Nx to account for failures
             }
 
             for future in as_completed(future_to_article):
@@ -1253,10 +1257,10 @@ class AnalysisPipeline:
 
         # Analyze matched articles
         signals = []
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
             future_to_article = {
                 executor.submit(self.analyze_article, article): article
-                for article in matched_articles[:max_signals * 3]
+                for article in matched_articles[:max_signals * self._process_multiplier]
             }
 
             for future in as_completed(future_to_article):

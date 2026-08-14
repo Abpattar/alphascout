@@ -12,6 +12,17 @@ schedule:
   spike_scan_market_hours_only: true  # only scan 9:15 AM – 3:30 PM IST
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PIPELINE EXECUTION (speed / throughput)
+# max_workers: articles analyzed in parallel (8 Groq keys + 3 other providers can
+#   handle 6 without rate-limit trouble; bump only if provider errors stay ~0)
+# process_multiplier: how many articles to analyze per signal wanted
+#   (max_signals * this = candidate articles chewed per run)
+# ─────────────────────────────────────────────────────────────────────────────
+pipeline:
+  max_workers: 6
+  process_multiplier: 4
+
+# ─────────────────────────────────────────────────────────────────────────────
 # UNIVERSE FILTERS
 # ─────────────────────────────────────────────────────────────────────────────
 universe:

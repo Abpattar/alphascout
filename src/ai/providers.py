@@ -483,6 +483,7 @@ class ProviderRegistry:
         # Issue 4: daily budget ceiling
         self._daily_budget: Dict[str, int] = {}
         self._daily_stats: Dict[str, int] = {"calls": 0, "tokens_est": 0}
+        self._stats_lock = Lock()  # concurrent worker threads share the budget counters
         self._daily_stats_path = Path(__file__).parent.parent.parent / "data" / "daily_llm_stats.json"
         self._initialize()
         self._load_daily_budget()
@@ -605,18 +606,21 @@ class ProviderRegistry:
 
     def _check_budget(self) -> bool:
         """Issue 4: Return True if we are still within daily budget; False if exhausted."""
-        if self._daily_stats["calls"] >= self._daily_budget.get("calls", 300):
-            return False
-        if self._daily_stats["tokens_est"] >= self._daily_budget.get("tokens", 120000):
-            return False
-        return True
+        with self._stats_lock:
+            if self._daily_stats["calls"] >= self._daily_budget.get("calls", 300):
+                return False
+            if self._daily_stats["tokens_est"] >= self._daily_budget.get("tokens", 120000):
+                return False
+            return True
 
     def _record_call(self, estimated_tokens: int = 700):
         """Increment daily counters and persist periodically."""
-        self._daily_stats["calls"] += 1
-        self._daily_stats["tokens_est"] += estimated_tokens
-        # Persist every 10 calls to avoid excessive disk writes
-        if self._daily_stats["calls"] % 10 == 0:
+        with self._stats_lock:
+            self._daily_stats["calls"] += 1
+            self._daily_stats["tokens_est"] += estimated_tokens
+            # Persist every 10 calls to avoid excessive disk writes
+            persist = self._daily_stats["calls"] % 10 == 0
+        if persist:
             self._persist_daily_stats()
 
     def get_provider(self, name: str) -> Optional[BaseProvider]:
