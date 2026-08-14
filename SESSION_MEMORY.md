@@ -1,6 +1,29 @@
 # AlphaScout Session Memory
-**Last Updated:** 2026-08-10 (Session 11)
+**Last Updated:** 2026-08-14 (Session 12)
 **Project Root:** `/home/neo/Codes/alphascout` (Linux; was `D:\Codes\alphascout` on Windows)
+
+---
+
+## Session 12 (2026-08-14) — Commit Session 11 + first real wins on the new budget
+
+### What we did
+1. ✅ **Committed + pushed Session 11** (`192078a`, 7 files, +743/−19) — holdings/reminder feature + LLM budget bump are now on GitHub. Working tree clean (only `data/` untracked, fully gitignored).
+2. ✅ **Full live run confirmed the budget reset works** — `main.py run --signals 5`:
+   - **Auto-resolved the 4 stale Aug-10 signals → first real wins**: CUPID.NS +15.0% (WIN, target hit), AARTIPHARM.NS +12.56% (WIN), UTLSOLAR.BO +5.63% (HOLD), CYIENT.NS +2.12% (HOLD). 2W / 0L / 2H on these.
+   - **2 new signals delivered to Telegram** (both sent OK): JTEKTINDIA.NS WATCH 72% (implied beneficiary, manufacturing), PRAJIND.NS BUY 76% (newly discovered company, entry break ₹340).
+   - **Usage**: 84 LLM calls / ~58.8K est tokens — only 6% of the new daily budget (1416 calls left, 1.34M tokens left). No budget issues; rate limits (8 Groq keys) remain the real ceiling.
+   - Pipeline discipline held: 3 trades rejected on honest R:R < 1.5 (IDEAFORGE, APOLLO, PGEL, DEVIT), TATATECH name/ticker mismatch guard fired again, circuit-risk penalty on IDEAFORGE, non-Yahoo stocks (PARASDEF, ZENTEC, BHARATFORG, WABCO, DIXON) correctly discarded.
+   - Only 3 LLM errors across 84 calls (1 cerebras, 1 gemini timeout, 1 openrouter JSON-parse — all gracefully retried/absorbed).
+
+### Current state
+- 6 signals in DB (2 today), 4 outcomes (2 WIN / 2 HOLD), 0 holdings, all committed & pushed.
+- LLM budget: 1.5M tokens / 1500 calls/day (new).
+- DB stats show first real accuracy data (4 resolved outcomes).
+
+### Suggested next steps (continue here)
+1. Keep the scheduler running (`python main.py scheduler`) so buttons/reminders work; test the buy→7d→30d lifecycle on a real holding via Telegram.
+2. Let today's signals (JTEKTINDIA.NS, PRAJIND.NS) age past 1 day → auto-resolve on next run → win rate/calibration updates.
+3. As outcomes accumulate, re-check calibration buckets (calibrate command) — current data still sparse (4 outcomes).
 
 ---
 
