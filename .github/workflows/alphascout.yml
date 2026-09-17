@@ -1,0 +1,72 @@
+name: AlphaScout Daily Run
+
+"on":
+  schedule:
+    # GitHub Actions cron is UTC. IST = UTC + 5:30.
+    - cron: "30 2 * * *"   # 08:00 AM IST
+    - cron: "30 14 * * *"  # 08:00 PM IST
+  workflow_dispatch:
+    inputs:
+      signals:
+        description: "Max signals to generate"
+        required: false
+        default: "5"
+      mode:
+        description: "Pipeline mode"
+        required: false
+        default: "run"
+        type: choice
+        options:
+          - run
+          - scan
+
+# Never let two AlphaScout runs overlap. If one is already running,
+# a newly triggered run queues until it finishes (nothing is cancelled).
+concurrency:
+  group: alphascout
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  alphascout:
+    name: AlphaScout
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout latest code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run AlphaScout
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
+          GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
+          GROQ_API_KEY_4: ${{ secrets.GROQ_API_KEY_4 }}
+          GROQ_API_KEY_5: ${{ secrets.GROQ_API_KEY_5 }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          KITE_API_KEY: ${{ secrets.KITE_API_KEY }}
+          KITE_API_SECRET: ${{ secrets.KITE_API_SECRET }}
+          KITE_ACCESS_TOKEN: ${{ secrets.KITE_ACCESS_TOKEN }}
+          TRADING_CAPITAL: ${{ secrets.TRADING_CAPITAL }}
+        run: |
+          mode="${{ inputs.mode || 'run' }}"
+          signals="${{ inputs.signals || '5' }}"
+          echo "Running AlphaScout: mode=$mode signals=$signals"
+          python main.py "$mode" --no-cache --signals "$signals"
