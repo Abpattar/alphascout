@@ -1,0 +1,52 @@
+name: AlphaScout Watchdog
+
+# Safety net for GitHub's unreliable `schedule` cron. Runs ~35 minutes after
+# each main slot; if the main workflow never fired (or is still running later
+# than that), it dispatches AlphaScout manually so no day is missed.
+"on":
+  schedule:
+    - cron: "35 3 * * *"   # 9:05 AM IST (03:35 UTC) — ~1h after the 8 AM slot
+    - cron: "35 15 * * *"  # 9:05 PM IST (15:35 UTC) — ~1h after the 8 PM slot
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  watchdog:
+    name: Watchdog
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Count AlphaScout scheduled runs in the last ~13h
+        id: check
+        run: |
+          since="$(date -u -d '13 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+          count="$(
+            gh api \
+              "repos/${{ github.repository }}/actions/runs?workflow_id=alphascout.yml&event=schedule&created=>=$since" \
+              --jq '.total_count'
+          )"
+          echo "alpha_scout_runs_last_13h=$count"
+          echo "count=${count:-0}" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Dispatch AlphaScout if the scheduled run was missed
+        if: steps.check.outputs.count == '0'
+        run: |
+          gh api -X POST \
+            "repos/${{ github.repository }}/actions/workflows/alphascout.yml/dispatches" \
+            -f ref=main -f 'inputs[reason]=watchdog'
+          echo "Gamma: scheduled run was skipped by GitHub — dispatched AlphaScout manually."
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Report status
+        run: |
+          if [ "${{ steps.check.outputs.count }}" == "0" ]; then
+            echo "Gamma: scheduled AlphaScout run was MISSING -> manual dispatch sent."
+          else
+            echo "Gamma: AlphaScout already ran on schedule today, no action needed."
+          fi
