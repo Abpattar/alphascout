@@ -18,6 +18,13 @@ import requests
 import yfinance as yf
 from bs4 import BeautifulSoup
 
+# Force IPv4 resolution — broken IPv6 routing makes HTTP calls hang
+try:
+    from src.netfix import force_ipv4
+    force_ipv4()
+except ImportError:
+    pass
+
 from src.config import get_all_sector_tickers, get_all_sector_keywords, DATA_DIR
 
 logger = logging.getLogger(__name__)
@@ -84,13 +91,15 @@ def passes_stock_safety_filter(
 
 def check_circuit_history(ticker: str, days: int = 30) -> dict:
     """
-    Problem 8: Check if a stock has hit any circuits recently.
-    Recent circuit hits count AGAINST a stock (hard to exit).
+    Problem 8: Check if a stock has hit its LOWER circuit recently.
+    Lower-circuit hits count AGAINST a stock (sellers locked in, hard to exit).
+    Upper-circuit days are NOT counted — those mean buyers are locked out,
+    which makes exiting easy, not hard.
     Returns: {"has_circuit_hits": bool, "circuit_days": int, "max_lower_circuit_pct": float}
     """
     try:
         t = yf.Ticker(ticker)
-        hist = t.history(period=f"{days}d")
+        hist = _yf_call_with_timeout(t.history, period=f"{days}d")
         if hist.empty or len(hist) < 2:
             return {"has_circuit_hits": False, "circuit_days": 0, "max_lower_circuit_pct": 0}
 
@@ -101,13 +110,14 @@ def check_circuit_history(ticker: str, days: int = 30) -> dict:
             prev_close = float(hist["Close"].iloc[i - 1])
             curr_close = float(hist["Close"].iloc[i])
             if prev_close > 0:
-                change_pct = abs((curr_close - prev_close) / prev_close * 100)
-                # Indian markets have 5% or 10% circuit limits
-                # A move of exactly 4.9-5.1% or 9.9-10.1% suggests circuit hit
-                if (4.8 <= change_pct <= 5.2) or (9.8 <= change_pct <= 10.2) or change_pct >= 19.5:
+                change_pct = (curr_close - prev_close) / prev_close * 100
+                # Indian markets have 5% or 10% circuit limits. A DOWN move of
+                # exactly ~4.9-5.1% / ~9.9-10.1% (or worse) suggests a lower
+                # circuit hit — only these make exits difficult.
+                drop = -change_pct
+                if (4.8 <= drop <= 5.2) or (9.8 <= drop <= 10.2) or drop >= 19.5:
                     circuit_days += 1
-                    if curr_close < prev_close:
-                        max_lower_pct = max(max_lower_pct, change_pct)
+                    max_lower_pct = max(max_lower_pct, drop)
 
         return {
             "has_circuit_hits": circuit_days > 0,
@@ -115,6 +125,9 @@ def check_circuit_history(ticker: str, days: int = 30) -> dict:
             "max_lower_circuit_pct": round(max_lower_pct, 2),
         }
 
+    except TimeoutError:
+        logger.debug(f"Circuit check timed out for {ticker}")
+        return {"has_circuit_hits": False, "circuit_days": 0, "max_lower_circuit_pct": 0}
     except Exception as e:
         logger.debug(f"Circuit check failed for {ticker}: {e}")
         return {"has_circuit_hits": False, "circuit_days": 0, "max_lower_circuit_pct": 0}
@@ -627,6 +640,25 @@ def refresh_universe() -> Dict[str, Stock]:
 
 _dynamic_cache: Dict[str, Optional[tuple]] = {}
 
+# Thread-based timeout wrapper for blocking yfinance HTTP calls.
+# yfinance uses synchronous requests with no built-in timeout, which can
+# stall a ThreadPoolExecutor worker indefinitely.
+_YF_TIMEOUT_SECS = 10
+
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutureTimeout
+
+_yf_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="yf-timeout")
+
+def _yf_call_with_timeout(fn, *args, timeout: float = _YF_TIMEOUT_SECS, **kwargs):
+    """Run a blocking yfinance call with a hard timeout. Returns result or raises TimeoutError."""
+    future = _yf_executor.submit(fn, *args, **kwargs)
+    try:
+        return future.result(timeout=timeout)
+    except _FutureTimeout:
+        raise TimeoutError(f"yfinance call timed out after {timeout}s")
+    except Exception:
+        raise
+
 # Known tickers for companies yfinance can't find directly
 # AI often returns wrong tickers — this maps them to the correct ones
 _KNOWN_TICKER_MAP = {
@@ -647,9 +679,13 @@ _KNOWN_TICKER_MAP = {
     "SWPEL": "SWPEL.NS",
     "SWPEL.NS": "SWPEL.NS",
     "SWPEL.BO": "SWPEL.NS",
-    "PARASDEF": "PARASDEF.NS",
-    "PARASDEF.NS": "PARASDEF.NS",
-    "PARASDEF.BO": "PARASDEF.NS",
+    # Paras Defence trades as PARAS on NSE/Yahoo — LLMs often emit PARASDEF
+    "PARASDEF": "PARAS.NS",
+    "PARASDEF.NS": "PARAS.NS",
+    "PARASDEF.BO": "PARAS.NS",
+    "PARAS": "PARAS.NS",
+    "PARAS.NS": "PARAS.NS",
+    "PARAS.BO": "PARAS.NS",
     "ASTRAMICRO": "ASTRAMICRO.NS",
     "ASTRAMICRO.NS": "ASTRAMICRO.NS",
     "ASTRAMICRO.BO": "ASTRAMICRO.NS",
@@ -740,7 +776,7 @@ def _search_ticker_by_name(company_name: str) -> Optional[tuple]:
 
     try:
         # Use yfinance search endpoint
-        search = yf.Search(company_name, max_results=5)
+        search = _yf_call_with_timeout(yf.Search, company_name, max_results=5)
 
         if not search or not search.quotes:
             return None
@@ -753,7 +789,7 @@ def _search_ticker_by_name(company_name: str) -> Optional[tuple]:
 
             # Get full info
             ticker_data = yf.Ticker(symbol)
-            info = ticker_data.info
+            info = _yf_call_with_timeout(lambda td=ticker_data: td.info)
 
             if not info or info.get("regularMarketPrice") is None:
                 continue
@@ -866,7 +902,7 @@ def validate_ticker_on_the_fly(ticker: str, company_name: str = "") -> Optional[
             # Mapped ticker not in universe — try to fetch it from yfinance
             try:
                 stock_data = yf.Ticker(mapped_ticker)
-                info = stock_data.info
+                info = _yf_call_with_timeout(lambda: stock_data.info)
                 if info and info.get("regularMarketPrice"):
                     price = info.get("regularMarketPrice", 0)
                     market_cap = info.get("marketCap", 0)
@@ -909,7 +945,7 @@ def validate_ticker_on_the_fly(ticker: str, company_name: str = "") -> Optional[
     for t in candidates:
         try:
             stock_data = yf.Ticker(t)
-            info = stock_data.info
+            info = _yf_call_with_timeout(lambda sd=stock_data: sd.info)
 
             if not info or info.get("regularMarketPrice") is None:
                 continue

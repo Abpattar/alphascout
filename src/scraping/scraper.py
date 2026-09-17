@@ -11,13 +11,25 @@ import json
 import logging
 import random
 import re
+import sys
 import time
 import yaml
+
+from pathlib import Path
+
+# Force IPv4 resolution — broken IPv6 routing makes HTTP calls hang
+try:
+    from src.netfix import force_ipv4
+except ImportError:  # direct-script execution
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from netfix import force_ipv4
+force_ipv4()
+
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Optional, Set
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
@@ -42,7 +54,7 @@ MARKET_KW = [
     "stock", "share", "market", "nse", "bse", "sensex", "nifty",
     "ipo", "qip", "buyback", "dividend", "earnings", "results",
     "profit", "revenue", "order", "contract", "deal", "acquisition",
-    "merger", "expansion", "capex", "investment", "plI",
+    "merger", "expansion", "capex", "investment", "pli",
     "production linked incentive", "export", "partnership",
     "small cap", "mid cap", "micro cap", "multibagger",
     "railway", "ev", "solar", "renewable", "infrastructure",
@@ -55,6 +67,42 @@ EXCLUDE_KW = [
     "cheetah", "wildlife", "leopard", "tiger", "animal",
     "marriage", "wedding", "festival", "recipe", "cooking",
 ]
+
+
+def _merge_keywords_from_config():
+    """Merge the keyword lists from config/sources.yaml into the module lists
+    (config is the single source of truth for extra terms)."""
+    global DEFENCE_KW, MARKET_KW, EXCLUDE_KW
+    try:
+        with open(CONFIG_DIR / "sources.yaml") as f:
+            data = yaml.safe_load(f)
+        defc = [str(k).lower() for k in data.get("defence_keywords", [])]
+        mkt = [str(k).lower() for k in data.get("market_keywords", [])]
+        exc = [str(k).lower() for k in data.get("exclude_keywords", [])]
+        if defc:
+            DEFENCE_KW = list(dict.fromkeys(DEFENCE_KW + defc))
+        if mkt:
+            MARKET_KW = list(dict.fromkeys(MARKET_KW + mkt))
+        if exc:
+            EXCLUDE_KW = list(dict.fromkeys(EXCLUDE_KW + exc))
+    except Exception:
+        pass
+
+
+_merge_keywords_from_config()
+
+
+def _build_kw_patterns() -> Dict[str, "re.Pattern"]:
+    """Short keywords (<=4 chars) are matched as whole words so 'mod' never
+    matches 'modern', 'bel' never matches 'believe', etc."""
+    pats = {}
+    for kw in DEFENCE_KW + MARKET_KW:
+        if len(kw) <= 4:
+            pats[kw] = re.compile(r"\b" + re.escape(kw) + r"\b", re.IGNORECASE)
+    return pats
+
+
+_KW_PATTERNS = _build_kw_patterns()
 
 
 @dataclass
@@ -81,10 +129,13 @@ def is_relevant(title: str, content: str = "") -> bool:
     text = (title + " " + content).lower()
     if any(ex in text for ex in EXCLUDE_KW):
         return False
-    if any(kw in text for kw in DEFENCE_KW):
-        return True
-    if any(kw in text for kw in MARKET_KW):
-        return True
+    for kw in DEFENCE_KW + MARKET_KW:
+        pat = _KW_PATTERNS.get(kw)
+        if pat:
+            if pat.search(text):
+                return True
+        elif kw in text:
+            return True
     return False
 
 
@@ -97,9 +148,81 @@ def get_headers() -> dict:
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# ARTICLE-URL QUALITY FILTERS
+# HTML listing pages are full of menu/nav/category links that are not
+# articles. These helpers drop them so the scraper only keeps real stories.
+# ─────────────────────────────────────────────────────────────────────────
+
+_JUNK_URL_SEGMENTS = {
+    "about", "topic", "tag", "tags", "category", "categories", "section",
+    "feed", "feeds", "screens", "screen", "login", "signup", "register",
+    "privacy", "terms", "terms-of-use", "advertise", "advertising", "contact",
+    "newsletter", "store", "app", "help", "faq", "careers", "sitemap", "rss",
+    "podcast", "videos", "photogallery", "trending", "market-activity",
+    "most-active", "top-gainers", "top-losers", "unlisted-shares", "calendar",
+    "upcoming-ipos", "ipo-list", "stock-brokers", "corporate", "analysis",
+    "opinion", "editorial", "author", "authors", "search", "results",
+}
+_ARTICLE_URL_ID_RE = re.compile(r"\d{5,}")
+_ARTICLE_URL_DATE_RE = re.compile(r"/(?:19|20)\d{2}/\d{1,2}/\d{1,2}/")
+_ARTICLE_URL_TOKENS = {
+    "articleshow", "story", "stories", "article", "news", "companies",
+    "business", "defence", "market", "markets", "company", "stock",
+    "result", "economy", "industry", "blog",
+}
+_JUNK_TITLES = {
+    "stock market news", "most active stocks", "trending stocks",
+    "unlisted shares", "market turnover", "markets calendar",
+    "recent ipos list", "stock companies list", "defence industry",
+    "defence dialogue", "national security", "latest news", "top stories",
+    "read more", "popular", "top gainers", "top losers", "scheduled orders",
+    "more news", "related stories", "recommended", "you may also like",
+}
+
+
+def _is_article_url(href: str) -> bool:
+    """True if href looks like a real news article (not a menu/category page)."""
+    lower = href.lower()
+    try:
+        path = urlparse(lower).path
+    except Exception:
+        path = lower
+    segs = [s for s in path.split("/") if s]
+    if any(s in _JUNK_URL_SEGMENTS for s in segs):
+        return False
+    if _ARTICLE_URL_ID_RE.search(path) or _ARTICLE_URL_DATE_RE.search(path):
+        return True
+    return any(seg in _ARTICLE_URL_TOKENS for seg in segs)
+
+
+def _is_junk_title(title: str) -> bool:
+    return title.strip().lower() in _JUNK_TITLES
+
+
+_BASE_SELECTORS = [
+    "article", ".article-body", "main", ".post-content", ".entry-content",
+    "#content", ".news-content", ".story-content", ".article__content",
+    ".Normal", ".articlebodycontent", ".content-para", ".detail-content",
+]
+
+
+def _load_enrichment_selectors() -> List[str]:
+    try:
+        with open(CONFIG_DIR / "sources.yaml") as f:
+            data = yaml.safe_load(f)
+        sels = data.get("enrichment_selectors", []) or []
+        return [s for s in sels if s]
+    except Exception:
+        return []
+
+
+_ARTICLE_SELECTORS = list(dict.fromkeys(_load_enrichment_selectors() + _BASE_SELECTORS))
+
+
 def extract_content(html: str) -> str:
     soup = BeautifulSoup(html, "lxml")
-    for sel in ["article", ".article-body", "main", ".post-content", ".entry-content", "#content", ".news-content"]:
+    for sel in _ARTICLE_SELECTORS:
         el = soup.select_one(sel)
         if el:
             text = el.get_text(" ", strip=True)
@@ -226,8 +349,8 @@ class NewsScraper:
             rss_articles = await self._fetch_rss(session, src)
             articles.extend(rss_articles)
 
-        # If not enough, try HTML
-        if len(articles) < 3 and src.get("html"):
+        # If not enough (or a tier-1 government source), try HTML
+        if src.get("html") and (len(articles) < 5 or src.get("category") == "government"):
             html_articles = await self._fetch_html(session, src)
             articles.extend(html_articles)
 
@@ -283,6 +406,8 @@ class NewsScraper:
                         href = a.get("href", "")
 
                         if not title or not href or len(title) < 15:
+                            continue
+                        if _is_junk_title(title) or not _is_article_url(href):
                             continue
                         if not href.startswith("http"):
                             href = urljoin(src["base"], href)
@@ -395,6 +520,27 @@ class NewsScraper:
 # SYNC WRAPPER
 # ─────────────────────────────────────────────────────────────────────────
 
+def _run_async_or_thread(coro, timeout: int):
+    """Run a coroutine on this thread's loop, or in a worker thread when an
+    event loop is already running. Never mutates the caller's loop."""
+    try:
+        asyncio.get_running_loop()
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            future = pool.submit(asyncio.run, coro)
+            return future.result(timeout=timeout)
+    except RuntimeError:
+        return asyncio.run(coro)
+
+
+def _get_scrape_config() -> dict:
+    try:
+        from src.config import load_settings
+        return load_settings().get("scraping", {}) or {}
+    except Exception:
+        return {}
+
+
 def scrape_all_sources(categories: List[str] = None, use_cache: bool = True) -> List[Article]:
     scraper = NewsScraper()
 
@@ -404,25 +550,30 @@ def scrape_all_sources(categories: List[str] = None, use_cache: bool = True) -> 
             logger.info(f"Using {len(cached)} cached articles")
             return cached
 
+    cfg = _get_scrape_config()
+    max_per_source = int(cfg.get("max_articles_per_source", 20) or 20)
+    enrich_top_n = int(cfg.get("enrich_top_n", 15) or 15)
+
     try:
-        loop = asyncio.get_running_loop()
-        # Already in an event loop — use nest_asyncio-style manual run
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            future = pool.submit(asyncio.run, scraper.scrape_all(categories=categories))
-            articles = future.result(timeout=120)
-    except RuntimeError:
-        articles = asyncio.run(scraper.scrape_all(categories=categories))
+        articles = _run_async_or_thread(
+            scraper.scrape_all(categories=categories, max_per_source=max_per_source),
+            timeout=120,
+        )
+    except Exception as e:
+        logger.error(f"News scrape failed: {e}")
+        return []
 
     if articles:
         try:
-            loop = asyncio.get_running_loop()
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(asyncio.run, scraper.enrich_articles(articles, max_enrich=8))
-                articles = future.result(timeout=30)
-        except RuntimeError:
-            articles = asyncio.run(scraper.enrich_articles(articles, max_enrich=8))
+            enriched = _run_async_or_thread(
+                scraper.enrich_articles(articles, max_enrich=enrich_top_n), timeout=90
+            )
+            # Merge enrichment back into the FULL list — never let enrichment
+            # shrink the article set (the pipeline only sees what we return).
+            enriched_by_url = {a.url: a for a in enriched if isinstance(a, Article) and a.url}
+            articles = [enriched_by_url.get(a.url, a) for a in articles]
+        except Exception as e:
+            logger.warning(f"Enrichment failed (keeping scraped articles as-is): {e}")
         scraper._save_cache(articles)
 
     # Persist to database for backtesting and calibration

@@ -6,11 +6,11 @@ providers:
     enabled: true
     priority: 1
     models:
-      - name: "llama-3.3-70b-versatile"
+      - name: "openai/gpt-oss-120b"
         rpm: 30
         tpm: 6000
         best_for: ["triage", "impact_analysis", "trade_setup"]
-      - name: "llama-3.1-8b-instant"
+      - name: "openai/gpt-oss-20b"
         rpm: 30
         tpm: 6000
         best_for: ["entity_extraction", "quick_filter"]
@@ -72,7 +72,7 @@ providers:
 # Task routing: which provider/model to try first for each stage
 task_routing:
   triage:
-    primary: "groq:llama-3.3-70b-versatile"
+    primary: "groq:openai/gpt-oss-120b"
     fallback:
       - "cerebras:gpt-oss-120b"
       - "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"
@@ -85,12 +85,12 @@ task_routing:
     fallback:
       - "cerebras:gemma-4-31b"
       - "openrouter:nvidia/nemotron-3-super-120b-a12b:free"
-      - "groq:llama-3.1-8b-instant"
+      - "groq:openai/gpt-oss-20b"
     max_tokens: 1000
     temperature: 0.1
 
   impact_analysis:
-    primary: "groq:llama-3.3-70b-versatile"
+    primary: "groq:openai/gpt-oss-120b"
     fallback:
       - "cerebras:gpt-oss-120b"
       - "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"
@@ -99,7 +99,7 @@ task_routing:
     temperature: 0.15
 
   trade_setup:
-    primary: "groq:llama-3.3-70b-versatile"
+    primary: "groq:openai/gpt-oss-120b"
     fallback:
       - "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"
       - "openrouter:qwen/qwen3-next-80b-a3b-instruct:free"
@@ -110,14 +110,14 @@ task_routing:
   quick_filter:
     primary: "cerebras:gemma-4-31b"
     fallback:
-      - "groq:llama-3.1-8b-instant"
+      - "groq:openai/gpt-oss-20b"
       - "gemini:gemini-3.1-flash-lite"
       - "openrouter:nvidia/nemotron-3-super-120b-a12b:free"
     max_tokens: 300
     temperature: 0.05
 
   research:
-    primary: "groq:llama-3.3-70b-versatile"
+    primary: "groq:openai/gpt-oss-120b"
     fallback:
       - "cerebras:gpt-oss-120b"
       - "gemini:gemini-2.0-flash"

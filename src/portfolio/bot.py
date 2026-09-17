@@ -68,6 +68,10 @@ def fetch_current_price(ticker: str) -> Optional[float]:
 
 async def poll_updates():
     """Run the long-polling getUpdates loop forever. Start as an asyncio task."""
+    if not BOT_TOKEN:
+        logger.warning("TELEGRAM_BOT_TOKEN not set — interactive bot disabled (polling parked)")
+        while True:
+            await asyncio.sleep(3600)
     offset = 0
     logger.info("Telegram bot polling started")
     while True:

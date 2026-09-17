@@ -1,0 +1,80 @@
+================================================================================
+                            ALPHASCOUT v1.0 — PROJECT SUMMARY
+          Multi-Sector Small-Cap News → Trade Signal Bot for Indian Markets
+================================================================================
+
+OVERVIEW
+--------
+AlphaScout is an automated, AI-driven trading research assistant that converts
+Indian market news into actionable buy/sell trade signals for small-cap stocks.
+It scrapes 25 Indian news sources (mainstream, government/PIB/DRDO, market-
+specific, niche small-cap, and corporate filings), analyzes articles through an
+AI ensemble of 6 LLM providers (Groq x8 keys, Cerebras, OpenRouter, Gemini,
+NVIDIA NIM), and delivers fully-formed trade signals — entry, target, stop-loss,
+risk-reward, holding period, and confidence — directly to the user via a
+Telegram bot (@AlphaScoutSignals_bot). Target profile: stocks priced ₹50–500,
+market cap ₹100–5,000 Cr, 3–7 day holding horizon, minimum ~10% upside and an
+honest risk-reward ratio of at least 1.5:1.
+
+HOW IT WORKS
+------------
+The system runs a 4-stage LLM pipeline on every article:
+  1. Quick Filter   – rejects articles unrelated to 10 tracked sectors (defence,
+                      railways, EV, renewables, infra, pharma, chemicals,
+                      logistics, manufacturing, IT) using a fast Groq model.
+  2. Triage         – detects catalyst type, strength, time sensitivity, and
+                      PR/pump-and-dump risk (company PR alone never triggers a
+                      signal; independent confirmation is required).
+  3. Entity Extraction – identifies companies mentioned, including "implied
+                      beneficiaries" discovered via free web research when no
+                      company is named in the news.
+  4. Impact Analysis – predicts price direction, magnitude, confidence, and a
+                      validated trade plan (inverted/garbage plans are rejected).
+
+Two operating modes exist: a news-first pipeline ("run") and a screener-first
+pipeline ("scan") that starts from NSE gainers, Screener.in, Trendlyne, and
+intra-day price/volume spikes, then matches candidates to news. A lightweight
+spike scan runs every 15 minutes during market hours (9:15 AM–3:30 PM IST),
+while full runs execute twice daily (6:30 AM & 4:30 PM IST) via a built-in
+scheduler. A 75+ stock universe (built from Screener.in filters plus a ~200-entry
+NSE/BSE name-to-ticker lookup) expands dynamically: unknown companies found in
+news are validated live through yfinance and added on the fly.
+
+KEY ENGINEERING FEATURES
+------------------------
+- SQLite persistence (articles, LLM analyses, signals, outcomes, holdings).
+- Confidence calibration: raw LLM confidence is remapped using historical win
+  rates per bucket; auto-execute stays gated until buckets prove reliable.
+- Automated outcome resolution: every signal's result is checked against real
+  yfinance prices after its holding window, feeding backtests and calibration.
+- Daily LLM budget ceiling with graceful degradation across free-tier quotas;
+  thread-safe counters and parallel article processing (6 workers).
+- Risk controls: circuit-history penalty, liquidity filters, position sizing
+  limits, drawdown kill-switch, 48h per-ticker signal cooldown.
+- SEBI compliance gate: personal-use-only by default; sharing signals publicly
+  requires explicit acknowledgement of SEBI Research Analyst regulations.
+- Manual trading workflow: Telegram inline buttons ("I Bought It" / "I Sold It")
+  track holdings, with sell reminders on day 7 and 30.
+
+STATUS AND RESULTS
+------------------
+The pipeline is production-quality and battle-tested over 12 development
+sessions. Early honest results: mechanical price/volume spikes alone were NOT
+profitable (~57,000 simulated trades, profit factor < 1), so spike signals now
+serve as triggers with news + LLM confirmation layered on top. Live outcome
+tracking has produced real wins (e.g., CUPID.NS +15%, AARTIPHARM.NS +12.6%),
+and calibration has correctly exposed that high raw LLM confidence does not
+guarantee wins — auto-execution remains conservatively gated off. The project's
+philosophy throughout is measured honesty: validated trade plans, deduplicated
+statistics, penalized speculation, and decisions driven by resolved outcomes
+rather than optimistic claims.
+
+TECH STACK
+----------
+Python 3.12, asyncio, APScheduler, httpx/aiohttp, yfinance, SQLite, feedparser,
+Groq/Cerebras/OpenRouter/Gemini/NIM APIs, Telegram Bot API. Config-driven design
+(YAML) for sources, sectors, providers, trading rules, and budgets.
+
+--------------------------------------------------------------------------------
+Private project — personal use only. Not investment advice.
+================================================================================

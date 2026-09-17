@@ -21,6 +21,11 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
+# Force IPv4 — some machines have broken IPv6 routing that causes
+# httpx/requests/http.client to hang indefinitely on HTTPS connections.
+from src.netfix import force_ipv4 as _force_ipv4_patch
+_force_ipv4_patch()
+
 # Load .env if exists
 from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
@@ -354,6 +359,7 @@ async def run_spike_mini():
 
 async def run_scheduler():
     """Run 2x daily scheduler with intra-day spike scanning (Issue 2) and auto-outcome resolution (Problem 11)"""
+    from datetime import timedelta
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.cron import CronTrigger
     from apscheduler.triggers.interval import IntervalTrigger
@@ -369,17 +375,20 @@ async def run_scheduler():
 
     async def scheduled_spike_scan():
         """Issue 2: Lightweight spike scan — find spiking tickers and queue them for mini-analysis."""
-        from datetime import datetime as dt
-        now = dt.now()
-        ist_hour = (now.hour + 5) % 24  # rough IST offset (no pytz needed)
-        ist_minute = now.minute
-        market_open = ist_hour > 9 or (ist_hour == 9 and ist_minute >= 15)
-        market_closed = ist_hour >= 15 and ist_minute >= 30
+        try:
+            from zoneinfo import ZoneInfo
+            now_ist = dt.now(ZoneInfo("Asia/Kolkata"))
+        except Exception:
+            # Fallback: approximate IST = UTC+5:30
+            now_ist = dt.utcnow() + timedelta(hours=5, minutes=30)
+        t = now_ist.time()
+        market_open_time = dt.strptime("09:15", "%H:%M").time()
+        market_close_time = dt.strptime("15:30", "%H:%M").time()
 
-        if not market_open or market_closed:
+        if not (market_open_time <= t <= market_close_time):
             return  # skip outside market hours
 
-        print(f"\n⚡ Spike scan at {now.strftime('%H:%M:%S')} IST")
+        print(f"\n⚡ Spike scan at {now_ist.strftime('%H:%M:%S')} IST")
         await run_spike_mini()
 
     async def scheduled_resolve_outcomes():

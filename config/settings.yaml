@@ -86,12 +86,12 @@ ensemble:
   models:
     - name: "groq_70b"
       provider: "groq"
-      model: "llama-3.3-70b-versatile"
+      model: "openai/gpt-oss-120b"
       weight: 1.0
       stages: ["triage", "impact", "trade_setup"]
     - name: "groq_8b"
       provider: "groq"
-      model: "llama-3.1-8b-instant"
+      model: "openai/gpt-oss-20b"
       weight: 0.7
       stages: ["triage", "entity_extraction"]
     - name: "openrouter_qwen"

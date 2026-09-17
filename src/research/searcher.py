@@ -11,6 +11,13 @@ import time
 from typing import Dict, List, Optional
 from urllib.parse import quote
 
+# Force IPv4 resolution — broken IPv6 routing makes HTTP calls hang
+try:
+    from src.netfix import force_ipv4
+    force_ipv4()
+except ImportError:
+    pass
+
 import feedparser
 import requests
 

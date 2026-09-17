@@ -484,7 +484,17 @@ class AnalysisPipeline:
         if not result or not result.get("has_catalyst"):
             return None
 
-        return TriageResult(**result)
+        # Filter to dataclass fields + defaults for missing keys (reasoning models may omit fields)
+        import dataclasses as _dc
+        triage_fields = {f.name for f in _dc.fields(TriageResult)}
+        filtered = {k: v for k, v in result.items() if k in triage_fields}
+        # Defaults for required fields that reasoning models sometimes skip
+        filtered.setdefault("product_category", "unknown")
+        filtered.setdefault("named_companies", [])
+        filtered.setdefault("implied_companies", [])
+        filtered.setdefault("catalyst_strength", "MEDIUM")
+        filtered.setdefault("key_quote", "")
+        return TriageResult(**filtered)
 
     def _research_catalyst(self, triage: TriageResult, article_id=None) -> Optional[dict]:
         """
@@ -628,7 +638,7 @@ class AnalysisPipeline:
             "entity_extraction",
             system,
             prompt,
-            max_tokens=1000,
+            max_tokens=2500,
             temperature=0.1,
             require_ensemble=False  # Single model OK for extraction
         )
@@ -654,7 +664,10 @@ class AnalysisPipeline:
                             comp["ticker"] = tk
                             break
 
-        return EntityResult(**result)
+        # Filter to dataclass fields (reasoning models may add extra keys like 'risks')
+        entity_fields = {f.name for f in __import__('dataclasses').fields(EntityResult)}
+        filtered = {k: v for k, v in result.items() if k in entity_fields}
+        return EntityResult(**filtered)
 
     def _analyze_impact(self, triage: TriageResult, entities: EntityResult) -> List[ImpactPrediction]:
         """Stage 3: Predict price impact"""
@@ -832,7 +845,14 @@ class AnalysisPipeline:
             circuit_penalty = min(30, circuit_info["circuit_days"] * 10)
             pred.confidence = max(50, pred.confidence - circuit_penalty)
 
-        system, prompt = build_trade_prompt(pred.__dict__, current_price)
+        # ImpactPrediction strips event_summary/catalyst_type (not dataclass fields),
+        # so re-attach them from triage for the trade-setup prompt context.
+        pred_dict = pred.__dict__.copy()
+        if not pred_dict.get("event_summary"):
+            pred_dict["event_summary"] = getattr(triage, "event_summary", "")
+        if not pred_dict.get("catalyst_type"):
+            pred_dict["catalyst_type"] = getattr(triage, "catalyst_type", "")
+        system, prompt = build_trade_prompt(pred_dict, current_price)
 
         result = self.registry.execute_task(
             "trade_setup",
@@ -1163,6 +1183,8 @@ class AnalysisPipeline:
                 except BudgetExhaustedError:
                     budget_hit = True
                     logger.warning("Budget exhausted in batch — returning partial results")
+                    for f in future_to_article:
+                        f.cancel()
                     break
                 except Exception as e:
                     failed += 1
@@ -1257,6 +1279,7 @@ class AnalysisPipeline:
 
         # Analyze matched articles
         signals = []
+        budget_hit = False
         with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
             future_to_article = {
                 executor.submit(self.analyze_article, article): article
@@ -1265,11 +1288,17 @@ class AnalysisPipeline:
 
             for future in as_completed(future_to_article):
                 try:
-                    result = future.result(timeout=60)
+                    result = future.result(timeout=90)
                     if result:
                         signals.append(result)
                         if len(signals) >= max_signals:
                             break
+                except BudgetExhaustedError:
+                    budget_hit = True
+                    logger.warning("Budget exhausted in screener — returning partial results")
+                    for f in future_to_article:
+                        f.cancel()
+                    break
                 except Exception as e:
                     logger.error(f"Analysis failed: {e}")
 

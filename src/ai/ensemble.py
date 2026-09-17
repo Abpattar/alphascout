@@ -51,13 +51,13 @@ class EnsembleOrchestrator:
         """Initialize all available providers from env"""
         # Groq Multi-Key (Primary for reasoning)
         try:
-            self.multi_key_providers["groq_70b"] = GroqMultiKeyProvider("llama-3.3-70b-versatile")
+            self.multi_key_providers["groq_70b"] = GroqMultiKeyProvider("openai/gpt-oss-120b")
             logger.info(f"✅ Groq 70B: {self.multi_key_providers['groq_70b'].get_stats()['keys']} keys loaded")
         except Exception as e:
             logger.warning(f"Groq 70B init failed: {e}")
 
         try:
-            self.multi_key_providers["groq_8b"] = GroqMultiKeyProvider("llama-3.1-8b-instant")
+            self.multi_key_providers["groq_8b"] = GroqMultiKeyProvider("openai/gpt-oss-20b")
             logger.info(f"✅ Groq 8B: {self.multi_key_providers['groq_8b'].get_stats()['keys']} keys loaded")
         except Exception as e:
             logger.warning(f"Groq 8B init failed: {e}")

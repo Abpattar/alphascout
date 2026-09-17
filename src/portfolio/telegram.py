@@ -12,16 +12,27 @@ from typing import Optional, Dict, List
 
 import aiohttp
 
+# Force IPv4 resolution — broken IPv6 routing makes HTTP calls hang
+try:
+    from src.netfix import force_ipv4
+    force_ipv4()
+except ImportError:
+    pass
+
 SSL_CTX = ssl.create_default_context()
 SSL_CTX.check_hostname = False
 SSL_CTX.verify_mode = ssl.CERT_NONE
 
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-if CHAT_ID:
-    CHAT_ID = int(CHAT_ID)
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or ""
+CHAT_ID = None
+_raw_chat_id = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+if _raw_chat_id:
+    try:
+        CHAT_ID = int(_raw_chat_id)
+    except ValueError:
+        logger.warning(f"TELEGRAM_CHAT_ID is not numeric ({_raw_chat_id!r}) — Telegram sending disabled")
 
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else ""
 

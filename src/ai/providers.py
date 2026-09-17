@@ -20,6 +20,10 @@ try:
 except ImportError:
     pass
 
+# Force IPv4 resolution — broken IPv6 routing makes provider calls hang
+from src.netfix import force_ipv4  # noqa: E402
+force_ipv4()
+
 logger = logging.getLogger(__name__)
 
 
@@ -97,10 +101,13 @@ class BaseProvider(ABC):
         if not text:
             return None
 
+        # Strip <think>...</think> tags from reasoning models
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+
         # Remove markdown code blocks
         text = text.strip()
         if "```" in text:
-            match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
+            match = re.search(r'```(?:json)?\s*(\{.*\})\s*```', text, re.DOTALL)
             if match:
                 text = match.group(1)
             else:
@@ -122,28 +129,110 @@ class BaseProvider(ABC):
             except json.JSONDecodeError:
                 pass
 
-        # Truncation recovery: try to fix truncated JSON
-        # Find the last complete key-value pair
-        truncated_match = re.search(r'\{.*', text, re.DOTALL)
-        if truncated_match:
-            partial = truncated_match.group(0)
-            # Try closing open strings and the object
-            attempts = [
-                partial + '"',           # Close an open string
-                partial + '"}',          # Close string + object
-                partial + '"}]',         # Close string + array + object
-                partial + '"],"risks":[]}',  # Close string + risks array
-            ]
-            for attempt in attempts:
-                try:
-                    result = json.loads(attempt)
-                    if result:
-                        logger.debug(f"Recovered truncated JSON: {list(result.keys())}")
-                        return result
-                except json.JSONDecodeError:
-                    continue
+        # Truncation recovery: salvage the longest valid prefix of the object
+        repaired = self._repair_truncated_json(text)
+        if repaired:
+            logger.debug(f"Recovered truncated JSON with keys: {list(repaired.keys())}")
+            return repaired
 
         logger.warning(f"Failed to parse JSON from {self.name}: {text[:200]}")
+        return None
+
+    def _repair_truncated_json(self, text: str) -> Optional[Dict]:
+        """
+        Salvage a truncated JSON object by cutting back to the last complete
+        element and closing any open strings/containers.
+
+        Example: '{"companies":[{"name":"A","reason":"partial' becomes
+                 '{"companies":[{"name":"A"}]}'
+        """
+        start = text.find("{")
+        if start == -1:
+            return None
+        s = text[start:]
+
+        stack = []          # open containers: "{" or "["
+        in_string = False
+        escaped = False
+        # (cut_index, stack_snapshot): valid prefix positions, longest first later
+        candidates = []
+
+        i = 0
+        n = len(s)
+        while i < n:
+            ch = s[i]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                i += 1
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch in "{[":
+                stack.append(ch)
+            elif ch in "}]":
+                if stack:
+                    stack.pop()
+                candidates.append((i + 1, list(stack)))
+                if not stack:
+                    break  # object fully balanced — direct parse would have worked
+            elif ch == "," and stack:
+                # value boundary: everything before the comma is complete
+                candidates.append((i, list(stack)))
+            i += 1
+
+        # If truncation hit exactly after a complete value (not inside a
+        # string), closing containers at EOF is also worth trying.
+        if not in_string and not escaped:
+            candidates.append((n, list(stack)))
+
+        # Prefer the longest prefix that parses cleanly
+        for cut, snap in reversed(candidates):
+            attempt = s[:cut].rstrip().rstrip(",")
+            for b in reversed(snap):
+                attempt += "}" if b == "{" else "]"
+            try:
+                result = json.loads(attempt)
+                if isinstance(result, dict):
+                    return result
+            except json.JSONDecodeError:
+                continue
+
+        # Last resort: mid-string cut at final comma (handles truncated key/value pairs)
+        j = len(s) - 1
+        while j > 0:
+            if s[j] == "," :
+                attempt = s[:j]
+                # recompute stack for this prefix
+                st, ins, esc = [], False, False
+                for c in attempt:
+                    if ins:
+                        if esc:
+                            esc = False
+                        elif c == "\\":
+                            esc = True
+                        elif c == '"':
+                            ins = False
+                        continue
+                    if c == '"':
+                        ins = True
+                    elif c in "{[":
+                        st.append(c)
+                    elif c in "}]" and st:
+                        st.pop()
+                for b in reversed(st):
+                    attempt += "}" if b == "{" else "]"
+                try:
+                    result = json.loads(attempt)
+                    if isinstance(result, dict):
+                        return result
+                except json.JSONDecodeError:
+                    pass
+            j -= 1
         return None
 
     def get_stats(self) -> Dict:
@@ -198,6 +287,14 @@ class GroqProvider(BaseProvider):
 class GroqMultiKeyProvider:
     """Groq with automatic key rotation"""
 
+    # Keys frequently share one org TPM bucket, so when one key gets a 429
+    # the others will too. Track a class-wide cooldown so every thread backs
+    # off together instead of burning through all keys instantly.
+    _org_cooldown_until = 0.0
+
+    # Never sleep more than this (total) waiting out rate limits per call.
+    MAX_RATELIMIT_WAIT_S = 20.0
+
     def __init__(self, model: str = "llama-3.3-70b-versatile"):
         self.model = model
         self.providers: List[GroqProvider] = []
@@ -232,6 +329,15 @@ class GroqMultiKeyProvider:
         self.current_index += 1
         return provider
 
+    @staticmethod
+    def _extract_retry_after(message: str) -> Optional[float]:
+        """Parse 'Please try again in 2.055s' / 'in 360ms' from Groq 429 bodies."""
+        m = re.search(r"try again in\s+([0-9.]+)\s*(ms|s)?", message)
+        if not m:
+            return None
+        val = float(m.group(1))
+        return val / 1000.0 if m.group(2) == "ms" else val
+
     def generate(
         self,
         prompt: str,
@@ -241,13 +347,30 @@ class GroqMultiKeyProvider:
         retries: int = 3
     ) -> Optional[Dict]:
         last_error = None
+        waited = 0.0
 
-        for attempt in range(retries * len(self.providers)):
+        # Cap attempts: try each key once (1 full rotation). Retries
+        # beyond that just burn 15 s per key for diminishing returns.
+        max_attempts = min(retries * len(self.providers), len(self.providers))
+        for attempt in range(max_attempts):
+            # Honor org-wide cooldown before touching any key
+            remaining = GroqMultiKeyProvider._org_cooldown_until - time.time()
+            if remaining > 0:
+                time.sleep(min(remaining, 15.0))
+
             provider = self._next_provider()
             try:
                 return provider.generate(prompt, system, max_tokens, temperature)
             except RateLimitError as e:
                 last_error = e
+                delay = self._extract_retry_after(str(e))
+                if delay is not None and waited + delay <= self.MAX_RATELIMIT_WAIT_S:
+                    logger.info(f"Groq rate limited — backing off {delay:.1f}s then retrying")
+                    time.sleep(delay)
+                    waited += delay
+                    GroqMultiKeyProvider._org_cooldown_until = time.time() + delay
+                    # Retry the SAME key — rotation doesn't help within one org bucket
+                    self.current_index -= 1
                 continue
             except Exception as e:
                 last_error = e
@@ -493,14 +616,14 @@ class ProviderRegistry:
         # Groq Multi-Key (Primary for reasoning)
         if os.environ.get("GROQ_API_KEY"):
             try:
-                self.providers["groq_70b"] = GroqMultiKeyProvider("llama-3.3-70b-versatile")
+                self.providers["groq_70b"] = GroqMultiKeyProvider("openai/gpt-oss-120b")
             except Exception as e:
                 logger.warning(f"Groq 70B init failed: {e}")
 
         # Groq 8B (Fast filter)
         if os.environ.get("GROQ_API_KEY"):
             try:
-                self.providers["groq_8b"] = GroqMultiKeyProvider("llama-3.1-8b-instant")
+                self.providers["groq_8b"] = GroqMultiKeyProvider("openai/gpt-oss-20b")
             except Exception as e:
                 logger.warning(f"Groq 8B init failed: {e}")
 

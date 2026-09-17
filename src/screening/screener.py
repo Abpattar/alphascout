@@ -10,6 +10,13 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Set, Any
 from datetime import datetime
 
+# Force IPv4 resolution — broken IPv6 routing makes HTTP calls hang
+try:
+    from src.netfix import force_ipv4
+    force_ipv4()
+except ImportError:
+    pass
+
 import requests
 import yfinance as yf
 from bs4 import BeautifulSoup
