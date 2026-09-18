@@ -1,12 +1,13 @@
 name: AlphaScout Watchdog
 
-# Safety net for GitHub's unreliable `schedule` cron. Runs ~35 minutes after
-# each main slot; if the main workflow never fired (or is still running later
-# than that), it dispatches AlphaScout manually so no day is missed.
+# Safety net for GitHub's unreliable `schedule` cron. Runs 30 minutes after
+# each main slot; if the main workflow never fired, it dispatches AlphaScout
+# manually so no day is missed. The main run has a dedupe guard, so late
+# GitHub cron runs can't double-send Telegram.
 "on":
   schedule:
-    - cron: "35 3 * * *"   # 9:05 AM IST (03:35 UTC) — ~1h after the 8 AM slot
-    - cron: "35 15 * * *"  # 9:05 PM IST (15:35 UTC) — ~1h after the 8 PM slot
+    - cron: "0 3 * * *"   # 8:30 AM IST (03:00 UTC) — 30 min after the 8 AM slot
+    - cron: "0 15 * * *"  # 8:30 PM IST (15:00 UTC) — 30 min after the 8 PM slot
   workflow_dispatch:
 
 permissions:
@@ -19,16 +20,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Count AlphaScout scheduled runs in the last ~13h
+      - name: Count AlphaScout scheduled runs in the last ~2h
         id: check
         run: |
-          since="$(date -u -d '13 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+          since="$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
           count="$(
             gh api \
               "repos/${{ github.repository }}/actions/runs?workflow_id=alphascout.yml&event=schedule&created=>=$since" \
               --jq '.total_count'
           )"
-          echo "alpha_scout_runs_last_13h=$count"
+          echo "alpha_scout_runs_last_2h=$count"
           echo "count=${count:-0}" >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ github.token }}

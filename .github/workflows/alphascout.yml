@@ -28,6 +28,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   alphascout:
@@ -48,7 +49,31 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # Guardian: skip late/duplicate AUTO runs (schedule + watchdog triggers only).
+      # Manual launches from the Actions page always run, so you can test anytime.
+      - name: Dedupe guard (skip if AlphaScout already succeeded recently)
+        id: dedupe
+        run: |
+          skip=false
+          recent=0
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event.inputs.reason }}" = "watchdog" ]; then
+            since="$(date -u -d '3 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+            recent="$(
+              gh api \
+                "repos/${{ github.repository }}/actions/runs?workflow_id=alphascout.yml&created=>=$since" \
+                --jq '[.workflow_runs[] | select(.status == "completed" and .conclusion == "success")] | length'
+            )"
+            if [ "${recent:-0}" -gt 0 ]; then
+              skip=true
+            fi
+          fi
+          echo "recent_successful_runs=${recent:-0}"
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - name: Run AlphaScout
+        if: steps.dedupe.outputs.skip != 'true'
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
