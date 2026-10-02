@@ -1,13 +1,14 @@
 name: AlphaScout Watchdog
 
-# Safety net for GitHub's unreliable `schedule` cron. Runs 30 minutes after
-# each main slot; if the main workflow never fired, it dispatches AlphaScout
-# manually so no day is missed. The main run has a dedupe guard, so late
-# GitHub cron runs can't double-send Telegram.
+# Safety net for GitHub's unreliable `schedule` cron. Runs 20 minutes after
+# each main slot (04:00 and 07:00 IST); if the main workflow never fired, it
+# hard-dispatches AlphaScout so no day is missed. The main run has a dedupe
+# guard, so a late GitHub cron run can't double-send Telegram.
 "on":
   schedule:
-    - cron: "0 3 * * *"   # 8:30 AM IST (03:00 UTC) — 30 min after the 8 AM slot
-    - cron: "0 15 * * *"  # 8:30 PM IST (15:00 UTC) — 30 min after the 8 PM slot
+    - cron: "20 4 * * *"  # 04:20 IST — 20 min after the 04:00 slot
+    - cron: "20 7 * * *"  # 07:20 IST — 20 min after the 07:00 slot
+  timezone: "Asia/Kolkata"
   workflow_dispatch:
 
 permissions:

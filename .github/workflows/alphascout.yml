@@ -2,9 +2,10 @@ name: AlphaScout Daily Run
 
 "on":
   schedule:
-    # GitHub Actions cron is UTC. IST = UTC + 5:30.
-    - cron: "30 2 * * *"   # 08:00 AM IST
-    - cron: "30 14 * * *"  # 08:00 PM IST
+    # Times below are IST (Asia/Kolkata), not UTC.
+    - cron: "0 4 * * *"  # 04:00 IST — overnight news scan
+    - cron: "0 7 * * *"  # 07:00 IST — pre-market news scan
+  timezone: "Asia/Kolkata"
   workflow_dispatch:
     inputs:
       signals:
