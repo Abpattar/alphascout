@@ -5,6 +5,7 @@ Issue 3: When personal_use_only is true, enforce single-recipient delivery.
 """
 import os
 import json
+import html
 import logging
 import asyncio
 import ssl
@@ -24,6 +25,21 @@ SSL_CTX.check_hostname = False
 SSL_CTX.verify_mode = ssl.CERT_NONE
 
 logger = logging.getLogger(__name__)
+
+
+def _esc(value) -> str:
+    """Escape untrusted text for Telegram HTML parse mode.
+
+    Signal fields come from LLM output over scraped news, so they routinely
+    contain < > & (e.g. a "<₹500" price or "&"). Telegram rejects the whole
+    message with 'can't parse entities' when those land raw inside HTML.
+    """
+    return html.escape(str(value if value is not None else ""), quote=False)
+
+
+def _esc_attr(value) -> str:
+    """Escape for an HTML attribute value (href), where quotes must go too."""
+    return html.escape(str(value if value is not None else ""), quote=True)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or ""
 CHAT_ID = None
@@ -163,23 +179,23 @@ def format_signal(signal: Dict) -> str:
     lines = [
         f"<b>{emoji} ALPHASCOUT SIGNAL</b>",
         f"",
-        f"<b>{trade.get('name', '')} ({trade.get('ticker', '').replace('.NS', '')})</b>",
-        f"Type: {trade_type} | {direction}",
-        f"Confidence: {trade.get('confidence', 0)}% | R:R {trade.get('risk_reward_ratio', 0):.1f}x",
+        f"<b>{_esc(trade.get('name', ''))} ({_esc((trade.get('ticker') or '').replace('.NS', ''))})</b>",
+        f"Type: {_esc(trade_type)} | {_esc(direction)}",
+        f"Confidence: {trade.get('confidence') or 0}% | R:R {(trade.get('risk_reward_ratio') or 0):.1f}x",
         f"",
-        f"📰 <b>Catalyst</b>: {catalyst.get('type', '')} ({catalyst.get('time_sensitivity', '')})",
-        f"💰 {catalyst.get('money_involved', 'N/A')} | {catalyst.get('product_category', '')}",
+        f"📰 <b>Catalyst</b>: {_esc(catalyst.get('type', ''))} ({_esc(catalyst.get('time_sensitivity', ''))})",
+        f"💰 {_esc(catalyst.get('money_involved', 'N/A'))} | {_esc(catalyst.get('product_category', ''))}",
         f"",
         f"📈 <b>Trade Plan</b>:",
-        f"   Entry: {trade.get('entry_strategy', '')}",
-        f"   Target: {trade.get('target_price', '')} (+{trade.get('target_pct', 0)}%)",
-        f"   Stop: {trade.get('stop_loss_price', '')} (-{trade.get('stop_loss_pct', 0)}%)",
+        f"   Entry: {_esc(trade.get('entry_strategy', ''))}",
+        f"   Target: {_esc(trade.get('target_price', ''))} (+{trade.get('target_pct', 0)}%)",
+        f"   Stop: {_esc(trade.get('stop_loss_price', ''))} (-{trade.get('stop_loss_pct', 0)}%)",
         f"   Hold: {trade.get('hold_days', 0)}-{trade.get('max_hold_days', 0)} days",
         f"",
-        f"💡 <b>Thesis</b>: {trade.get('thesis_one_line', '')}",
-        f"⚠️ <b>Kill Switch</b>: {trade.get('kill_switch', '')}",
+        f"💡 <b>Thesis</b>: {_esc(trade.get('thesis_one_line', ''))}",
+        f"⚠️ <b>Kill Switch</b>: {_esc(trade.get('kill_switch', ''))}",
         f"",
-        f"🔗 <a href='{article.get('url', '')}'>Read Article</a> | {article.get('source', '')}",
+        f"🔗 <a href='{_esc_attr(article.get('url', ''))}'>Read Article</a> | {_esc(article.get('source', ''))}",
     ]
 
     if signal.get("ensemble_agreement"):
