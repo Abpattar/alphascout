@@ -180,7 +180,46 @@ def pipeline_factory(store, market, resolver, ai):
     def build(**kwargs):
         params = dict(
             store=store, market=market, resolver=resolver, ai=ai,
-            max_signals=3, freshness_hours=30,
+            max_signals=3, freshness_hours=30, ticker_cooldown_hours=12,
+        )
+        params.update(kwargs)
+        return NewsSignalPipeline(**params)
+
+    return build
+
+
+class MultiResolver:
+    """Resolves several fake companies so tests can span multiple tickers."""
+
+    TABLE = {
+        "alphacorp": "ALPHA.NS",
+        "betacorp": "BETA.NS",
+        "gammacorp": "GAMMA.NS",
+        "fakecorp": "FAKECORP.NS",
+        "othercorp": "OTHER.NS",
+    }
+
+    def resolve_from_text(self, text: str):
+        low = (text or "").lower()
+        return [
+            Resolution(ticker, f"{name.title()} Ltd", "alias", True, "fake")
+            for name, ticker in self.TABLE.items() if name in low
+        ]
+
+
+@pytest.fixture
+def multi_resolver():
+    return MultiResolver()
+
+
+@pytest.fixture
+def pipeline_factory_multi(store, market, multi_resolver, ai):
+    from src.pipeline.news_signal import NewsSignalPipeline
+
+    def build(**kwargs):
+        params = dict(
+            store=store, market=market, resolver=multi_resolver, ai=ai,
+            max_signals=3, freshness_hours=30, ticker_cooldown_hours=12,
         )
         params.update(kwargs)
         return NewsSignalPipeline(**params)

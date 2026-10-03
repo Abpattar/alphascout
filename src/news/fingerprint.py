@@ -347,12 +347,21 @@ def is_new_development(
     prior_nums = set(_numbers(prior_headline))
     new_figures = bool(cand_nums - prior_nums)
 
+    # Case 1: the original event stated no figure and the follow-up escalates
+    # or quantifies it. "X receives SEBI notice" -> "SEBI orders X to pay 250
+    # crore". This is the clearest form of a development.
+    if not prior_nums:
+        return bool(new_figures or (fresh_actions & _ESCALATION_ACTIONS))
+
+    # Case 2: the original already gave a figure. A new figure on its own is
+    # NOT a development - "wins a 500 crore order" and "wins a 900 crore
+    # contract" are two separate orders. Require the follow-up to be
+    # recognisably the same event before treating it as a development.
     if new_figures:
-        return True
-    # Escalation without a stated figure: "SEBI notices X" -> "SEBI bans X".
-    if not prior_nums and (fresh_actions & _ESCALATION_ACTIONS):
-        return True
-    return False
+        return title_similarity(candidate_title, prior_headline) >= 0.62
+
+    # No new figure but a fresh escalation: "SEBI warns X" -> "SEBI bans X".
+    return bool(fresh_actions & _ESCALATION_ACTIONS)
 
 
 _ESCALATION_ACTIONS = {

@@ -67,20 +67,61 @@ def test_run2_article_a_same_url_different_tracking_params(pipeline_factory):
     assert second.run([article(A_TITLE, noisy)]) == []
 
 
-def test_run2_article_b_is_still_allowed(pipeline_factory):
-    """Suppressing A must not suppress an unrelated new story."""
-    first = pipeline_factory()
+def test_run2_article_b_is_still_allowed(pipeline_factory_multi):
+    """Suppressing A must not suppress an unrelated story from another company."""
+    first = pipeline_factory_multi()
     a_signals = first.run([article(A_TITLE, A_URL)])
     first.persist(a_signals)
     first.mark_sent(a_signals)
 
-    second = pipeline_factory()
+    second = pipeline_factory_multi()
     b_signals = second.run([
-        article(A_TITLE, A_URL, published="3h"),
-        article(B_TITLE, B_URL),
+        article(A_TITLE, A_URL, published="3h"),          # already delivered
+        article("Othercorp wins Rs 800 crore air-defence order",
+                "https://www.moneycontrol.com/news/other.html"),
     ])
-    assert len(b_signals) == 1, "only B should get through"
-    assert "capital expenditure" in b_signals[0]["article"]["title"]
+    assert len(b_signals) == 1, "only the new company should get through"
+    assert b_signals[0]["ticker"] == "OTHER.NS"
+    assert second.stats.stories_duplicate == 1
+
+
+def test_recent_ticker_is_deprioritised_not_blocked(pipeline_factory_multi):
+    """A new, different story about a just-signalled company is still sent.
+
+    The per-ticker cooldown only affects ranking. Blocking here would discard
+    genuinely new material news, which the product explicitly requires us to
+    allow; ranking keeps the three daily slots spread across companies.
+    """
+    first = pipeline_factory_multi()
+    signals = first.run([article(A_TITLE, A_URL)])
+    first.persist(signals)
+    first.mark_sent(signals)
+
+    second = pipeline_factory_multi()
+    later = second.run([article(
+        "Fakecorp receives SEBI show-cause notice",
+        "https://economictimes.indiatimes.com/news/other.cms",
+    )])
+    assert len(later) == 1, "new material news must not be silently dropped"
+    assert later[0].get("_recently_sent") is True
+
+
+def test_ranking_prefers_a_company_we_have_not_just_messaged_about(pipeline_factory_multi):
+    """With more candidates than slots, fresh tickers win the limited slots."""
+    first = pipeline_factory_multi()
+    signals = first.run([article(A_TITLE, A_URL)])
+    first.persist(signals)
+    first.mark_sent(signals)
+
+    second = pipeline_factory_multi(max_signals=1)
+    ranked = second.run([
+        article(A_TITLE.replace("Fakecorp", "Alphacorp"),
+                "https://economictimes.indiatimes.com/news/a2.cms"),
+        article("Betacorp wins Rs 800 crore air-defence order",
+                "https://economictimes.indiatimes.com/news/b2.cms"),
+    ])
+    assert len(ranked) == 1
+    assert ranked[0]["ticker"] == "BETA.NS", "the never-signalled ticker should win"
 
 
 def test_run3_new_development_is_allowed(pipeline_factory):
@@ -262,3 +303,21 @@ def test_sends_nothing_when_nothing_qualifies(pipeline_factory):
     pipeline = pipeline_factory()
     assert pipeline.run([]) == []
     assert pipeline.run([article("Old thing", A_URL, published=hours_ago(24 * 30))]) == []
+
+
+def test_sent_signal_rows_are_flagged_so_cooldown_works(pipeline_factory, store):
+    """Regression: cooldown reads SignalRecord.sent.
+
+    If persist() writes rows but mark_sent() never sets `sent`, the 48h
+    per-ticker cooldown is silently dead - the same class of defect as the
+    empty-database problem this rewrite set out to fix.
+    """
+    pipeline = pipeline_factory()
+    signals = pipeline.run([article(A_TITLE, A_URL)])
+    assert signals
+    assert pipeline.persist(signals) == 1
+    pipeline.mark_sent(signals)
+
+    sent = [s for s in store.recent_signals(days=1, limit=50) if s.sent]
+    assert sent, "signal rows must be flagged sent after delivery"
+    assert sent[0].ticker == "FAKECORP.NS"

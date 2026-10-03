@@ -62,6 +62,12 @@ MIN_ARTICLE_CHARS = 120
 # must be a real catalyst, not merely interesting.
 MIN_RELEVANCE_SCORE = 62
 
+# Per-ticker brake. Deliberately short. Repeats are already suppressed at
+# story level, so this only needs to stop a burst about one stock; a long
+# window would wrongly mute genuinely new news about a company signalled
+# earlier the same day. New developments bypass it entirely.
+DEFAULT_TICKER_COOLDOWN_HOURS = 12
+
 # Event types that are commentary about the market rather than news about a
 # company. An analyst's "top 3 stocks to buy" is a view, not an event, and
 # acting on it means trading on someone else's opinion.
@@ -277,7 +283,7 @@ class NewsSignalPipeline:
         ai: Optional[AIClient] = None,
         freshness_hours: int = DEFAULT_FRESHNESS_HOURS,
         max_signals: int = MAX_SIGNALS_PER_RUN,
-        ticker_cooldown_hours: int = 48,
+        ticker_cooldown_hours: int = DEFAULT_TICKER_COOLDOWN_HOURS,
         validator: Optional[SignalValidator] = None,
         ticker_allowlist: Optional[set] = None,
         min_relevance: int = MIN_RELEVANCE_SCORE,
@@ -763,15 +769,16 @@ class NewsSignalPipeline:
                     resolution.ticker,
                 )
                 continue
-            if self._in_cooldown(resolution.ticker) and not candidate.is_development:
-                # A genuine new development overrides the cooldown: the whole
-                # point of tracking developments is that fresh information
-                # about a company we just wrote about is still news.
+            # A ticker delivered recently is *deprioritised*, never blocked.
+            # Repeats are already suppressed at story level, so a hard
+            # per-ticker mute would only ever discard genuinely new material
+            # news - the case the product explicitly requires us to allow.
+            recently_sent = self._in_cooldown(resolution.ticker)
+            if recently_sent:
                 logger.info(
-                    "COOLDOWN: %s already delivered within %dh",
+                    "%s was delivered within %dh - deprioritising, not blocking",
                     resolution.ticker, self.ticker_cooldown_hours,
                 )
-                continue
 
             self.stats.candidates_ranked += 1
             context = self._market_context(resolution.ticker)
@@ -788,7 +795,13 @@ class NewsSignalPipeline:
             self.stats.ai_assessed += 1
             assessment = self._assess(candidate, context)
             if assessment is None:
+                # Usually a free-tier rate limit that survived the provider
+                # fallback chain. Recorded so the run log explains itself.
                 self.stats.ai_failed += 1
+                logger.warning(
+                    "AI produced no usable assessment for %s (%s) - not sending",
+                    resolution.ticker, getattr(self.ai, "last_error", "no reason recorded"),
+                )
                 continue
 
             direction = (assessment.get("direction") or "NEUTRAL").upper()
@@ -824,11 +837,17 @@ class NewsSignalPipeline:
 
             self.stats.validated_ok += 1
             seen_tickers.add(resolution.ticker)
+            signal["_recently_sent"] = recently_sent
             signals.append(signal)
 
-        # Strongest AI-relevance first, then best risk/reward.
+        # Ranking, in order of what actually matters:
+        #   1. a ticker we have not just messaged about, so three slots are not
+        #      filled with three stories about one company
+        #   2. the model's own relevance score
+        #   3. the risk/reward our own maths produced
         signals.sort(
             key=lambda s: (
+                not s.get("_recently_sent", False),
                 s.get("relevance_score", 0),
                 s["calculated"].get("risk_reward", 0),
             ),
@@ -897,6 +916,7 @@ class NewsSignalPipeline:
                 metadata={"event_type": ai.get("event_type", "")},
             ))
 
+            signal["_signal_id"] = signal_id
             records.append(SignalRecord(
                 signal_id=signal_id,
                 story_key=candidate_key,
@@ -950,8 +970,20 @@ class NewsSignalPipeline:
         return written
 
     def mark_sent(self, signals: Sequence[Dict[str, Any]]) -> None:
-        """Flag rows as delivered so they are never sent again."""
+        """Flag rows as delivered so they are never sent again.
+
+        Must update the *signal* row as well as the article and story rows:
+        the per-ticker cooldown reads ``SignalRecord.sent``, so leaving it
+        unset would silently disable the cooldown.
+        """
         for signal in signals:
+            signal_id = signal.get("_signal_id")
+            if signal_id:
+                try:
+                    self.store.mark_signal_sent(signal_id)
+                except Exception as exc:
+                    logger.error("Could not mark signal %s sent: %s", signal_id, exc)
+
             article = signal["article"]
             try:
                 self.store.upsert_articles([ArticleRecord(

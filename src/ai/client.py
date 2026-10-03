@@ -81,6 +81,7 @@ class AIClient:
         self._registry = None
         self.calls = 0
         self.failures = 0
+        self.last_error = ""
 
     def _get_registry(self):
         if self._registry is None:
@@ -105,7 +106,7 @@ class AIClient:
         *,
         max_tokens: int = 1200,
         temperature: float = 0.1,
-        max_attempts: int = 2,
+        max_attempts: int = 3,
     ) -> Optional[Dict[str, Any]]:
         """Call the model and return a dict, or ``None``.
 
@@ -153,6 +154,7 @@ class AIClient:
                 )
 
         self.failures += 1
+        self.last_error = last_error
         logger.warning("AI gave up after %d attempts (%s)", max_attempts, last_error)
         return None
 
