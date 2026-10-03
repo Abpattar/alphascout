@@ -1,225 +1,227 @@
-# AlphaScout v1.0
+# AlphaScout
 
-**Multi-Sector Small-Cap News → Trade Signal Bot for Indian Markets**
+Indian-market news intelligence. Finds genuinely new, material news about
+Indian listed companies, verifies the company against a real NSE/BSE listing,
+pulls **real** market data, computes trade levels with deterministic maths, uses
+AI only for interpretation, and sends at most **3** signals per run to Telegram.
 
-AlphaScout scrapes 25 Indian news sources, analyzes articles via an AI ensemble of 6 LLM providers, and generates buy/sell signals for small-cap stocks with automated Telegram delivery.
+> **Nothing is invented.** If market data is unavailable the signal is dropped.
+> If an article has no trustworthy publication timestamp it is not treated as
+> new. If the AI fails, nothing is sent. Fewer signals is the correct outcome.
 
-## Features
+---
 
-- Scrapes 25 Indian news sources (mainstream, government, market-specific, niche small-cap, corporate)
-- AI ensemble analysis using 6 providers (Groq, Cerebras, OpenRouter, Gemini, NVIDIA NIM)
-- Universe of 75+ small/mid-cap stocks built from Screener.in filters + on-the-fly expansion via yfinance
-- **NSE/BSE company name lookup table** (~200+ entries) for accurate article-to-ticker matching
-- Generates buy/sell signals with minimum 2:1 risk-reward ratio
-- Screener-first mode (NSE gainers → Screener.in → Trendlyne → match to news)
-- **Intra-day spike scanning** every 15 min during market hours (9:15 AM – 3:30 PM IST)
-- Telegram signal delivery via `@AlphaScoutSignals_bot`
-- 3-7 day holding period, min 10% upside target
-- Auto-execute trades at 90%+ confidence
-- 2x daily scheduler (6:30 AM & 4:30 PM IST) + intra-day spike scans
-- **Hard SEBI personal-use gate** — blocks non-personal mode without explicit env-var acknowledgement
-- **Daily LLM budget ceiling** — graceful degradation when free-tier quotas are exhausted
-- Confidence calibration from historical outcomes
-- Circuit history check — penalizes stocks with recent lower-circuit hits
-- PR/pump detection — company PR alone never triggers a signal
+## Schedule
 
-## Quick Start
+| Time (IST) | What runs |
+|---|---|
+| **04:00** | Main scan — overnight news |
+| 04:20 | Watchdog — re-dispatches if the 04:00 run was skipped by GitHub |
+| **07:00** | Main scan — pre-market news |
+| 07:20 | Watchdog — re-dispatches if the 07:00 run was skipped |
+
+Cron expressions carry an explicit `timezone: "Asia/Kolkata"`, so `0 4 * * *`
+means 04:00 **Indian** time (22:30 UTC), not 04:00 UTC.
+
+Both main runs happen **before the Indian market opens**, so every price is
+labelled `PREVIOUS CLOSE`. The system will never call a stale price live.
+
+---
+
+## Quick start
 
 ```bash
-# Clone the repo
-git clone https://github.com/Abpattar/alphascout.git
-cd alphascout
-
-# Create and activate virtual environment
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-venv\Scripts\activate     # Windows
-
-# Install dependencies
 pip install -r requirements.txt
+cp .env.example .env          # add your keys
 
-# Set up API keys
-cp .env.example .env
-# Edit .env with your API keys (at minimum, add a Groq key)
+python main.py health         # store + credentials + market session
+python main.py run --dry-run  # full pipeline, prints, sends nothing
+python main.py state          # what we remember from previous runs
 ```
 
-## Usage
+### Commands
+
+| Command | Purpose |
+|---|---|
+| `run` | Full pipeline; sends up to 3 signals |
+| `run --dry-run` | Everything except the Telegram send; writes no state |
+| `scan` | As `run`, but only stocks a live screener currently flags |
+| `state` | Persistent store contents and recent signals |
+| `health` | Store reachability, credentials, market session |
+| `backtest` / `db` / `holds` / `calibrate` / `config` | Supporting tools |
+
+---
+
+## How a signal is built
+
+```
+scrape 25 sources
+   → freshness gate      (publication timestamp must be real and recent)
+   → opinion/listicle filter
+   → cross-source clustering   (one story, many outlets → one candidate)
+   → persistent-history dedup  (already sent? → drop)
+   → developing-story check    (genuinely new development? → allow)
+   → verified Indian ticker    (name → NSE/BSE, confirmed against a real listing)
+   → real market data          (yfinance quote + 6 months of OHLCV)
+   → computed indicators       (SMA20/50, RSI-14, ATR-14, swing support/resistance)
+   → AI assessment             (material? direction? prose — NO numbers)
+   → deterministic levels      (entry = last real close; stop = 2×ATR; target = swing)
+   → validation gate           (can only veto)
+   → ≤3 signals → Telegram
+```
+
+### Facts vs calculation vs interpretation
+
+The Telegram message labels every section, because the distinction matters:
+
+| Label | Meaning | Source |
+|---|---|---|
+| `MARKET DATA (from market feed)` | price, previous close, volume, market cap | yfinance |
+| `CALCULATED (computed from real prices)` | entry, target, stop, risk/reward, RSI, SMA, ATR | this code |
+| `AI ASSESSMENT (interpretation, not data)` | catalyst, thesis, watchpoint, risk | language model |
+
+**The AI is never allowed to produce a number.** The prompt schema contains no
+price, percentage or indicator fields, the client strips 20 forbidden numeric
+keys from any response, and the validator rejects a signal whose AI block
+contains one. Entry must equal the real reference price — if the model tries to
+set it, the signal is dropped.
+
+---
+
+## Trade level method (`atr_swing_v1`)
+
+Stated explicitly so it can be checked:
+
+- **entry** — the last real close. Not a prediction.
+- **stop** — `2 × ATR(14)` from entry, floored at 1.5% of price, and widened to
+  the 20-bar swing low only when that stays inside the 12% risk cap.
+- **target** — the larger of `2 × risk` and the distance to the 20-bar swing
+  resistance, capped at `3 × risk`.
+- **risk/reward** — recomputed from the rounded levels. Never taken from the
+  model. Rejected below 1.8.
+
+---
+
+## Deduplication
+
+Three layers, in order of confidence:
+
+1. **Canonical URL** — strips `utm_*`, `fbclid`, `amp` variants, `www.`,
+   `m.` mobile hosts, trailing slashes.
+2. **Cross-source clustering** — within a run, articles are clustered by a
+   composite score (content-word overlap + material-figure overlap + edit
+   distance). "Company X announces Rs 10,000 crore investment" and "Company X
+   to invest Rs 10000 crore in expansion" merge into one story, keeping the
+   highest-tier outlet as the headline source and the rest as corroboration.
+3. **Cross-run story matching** — against every story already delivered. A
+   headline qualifies as a repeat on URL, on normalised headline, or on
+   composite similarity ≥ 0.62.
+
+### Repeat vs genuinely new development
+
+Both must be true to be treated as a new development:
+
+1. same **event category** (regulatory / order / earnings / capex / M&A /
+   fundraising / management / product / rating / policy), **and**
+2. a new or escalated action within that category, **and**
+3. new information — a material figure the earlier headline did not contain.
+
+So *"X receives SEBI notice"* → *"SEBI orders X to pay Rs 250 crore penalty"*
+is delivered as new information, while *"Lupin Q2 profit rises"* →
+*"Lupin wins USFDA nod"* is **not** (different categories, same company only).
+
+---
+
+## Persistence
+
+AlphaScout runs on ephemeral GitHub runners, so anything in `data/` is
+destroyed when the job ends. All memory therefore lives in a `StoryStore`,
+selected at startup:
+
+| Backend | When | How it survives |
+|---|---|---|
+| `git-state` (default) | always available | `state/*.jsonl` committed back to the repo by the workflow |
+| `supabase` | `SUPABASE_URL` + `SUPABASE_KEY` set | PostgreSQL via PostgREST |
+
+Force with `ALPHASCOUT_STORE=git|supabase`. Both implement the same interface;
+there is one production code path.
+
+Tables/rows: `articles` (canonical URL, title, fingerprint, published, first
+seen, sent flag), `stories` (event key, sent count, development index,
+corroborating sources), `signals` (ticker, real market price used, calculated
+levels, indicators, AI text, sent flag).
+
+Retention is bounded — articles 120 days, stories and signals 365.
+
+> **This is the fix for the system's central defect.** Previously the SQLite
+> database was gitignored and never committed, so every run started empty:
+> deduplication, the per-ticker cooldown, confidence calibration and
+> backtesting were all silently dead in production.
+
+---
+
+## Configuration
+
+`.env` (see `.env.example`):
+
+```
+GROQ_API_KEY, GROQ_API_KEY_2..8   # rotated round-robin; shared org bucket
+OPENROUTER_API_KEY, CEREBRAS_API_KEY, GEMINI_API_KEY, NVIDIA_NIM_API_KEY
+TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+SUPABASE_URL, SUPABASE_KEY         # optional; enables the Postgres backend
+```
+
+`config/`: `sources.yaml` (25 sources + keywords), `settings.yaml` (budgets,
+filters, risk limits), `nse_bse_tickers.json` (297 name→ticker),
+`sectors.yaml` (sector keywords).
+
+Optional env: `ALPHASCOUT_STORE`, `ALPHASCOUT_LOG_LEVEL`,
+`ALPHASCOUT_FORCE_IPV4=0`, `ALPHASCOUT_INSECURE_TLS=1` (escape hatch only —
+TLS verification is **on** by default).
+
+---
+
+## Cost
+
+Free tiers only. Market data via Yahoo Finance (unofficial), news via public
+RSS/HTML, AI via the free tiers of Groq / Cerebras / Gemini / OpenRouter /
+NVIDIA NIM, storage via git or Supabase's free tier. No paid API is required.
+
+---
+
+## Tests
 
 ```bash
-# Run the full pipeline (scrape → analyze → signal → Telegram)
-python main.py run --signals 3
-
-# Run screener-first mode
-python main.py scan --signals 5
-
-# Run without cache (fresh scrape)
-python main.py run --no-cache --signals 3
-
-# Start the scheduler (2x daily + intra-day spike scans)
-python main.py scheduler
-
-# Run backtest
-python main.py backtest
-
-# View portfolio
-python main.py portfolio
-
-# View config
-python main.py config
-
-# Test AI providers
-python main.py test
-
-# Run credential setup wizard
-python main.py --setup
+python -m pytest tests/ -q
 ```
 
-### SEBI Compliance Gate
+145 tests, no network required. They cover the scenarios that actually broke
+production:
 
-When `portfolio.personal_use_only` is set to `false` in `config/settings.yaml`, the bot requires an environment variable to confirm you have reviewed SEBI regulations:
+- the duplicate lifecycle (run 1 sends, run 2 suppresses, a new development is
+  allowed, cross-source merging, developing stories)
+- indicator maths against hand-computed and independently recomputed values
+- **negative** tests that a missing price, missing history or missing ATR
+  produces a rejection rather than a default
+- validation vetoes (unverified ticker, stale article, invented entry, AI
+  numeric fields)
+- Telegram formatting with hostile `<`/`&`/quote content and length limits
+- news-quality filtering of opinion pieces and listicles
+- dry-run isolation (writes no state)
 
-```bash
-# Windows PowerShell
-$env:I_HAVE_REVIEWED_SEBI_REGULATIONS="true"
-python main.py run
+---
 
-# Linux/Mac
-I_HAVE_REVIEWED_SEBI_REGULATIONS=true python main.py run
-```
+## Known limitations
 
-Without this variable, the bot will **refuse to start** in shared mode.
-
-### LLM Budget Configuration
-
-Budget ceilings are configured in `config/settings.yaml` under `llm_budget`:
-
-```yaml
-llm_budget:
-  daily_token_budget: 120000   # ~100K Groq free-tier + buffer
-  daily_call_budget: 300       # absolute max LLM calls/day
-  per_run_token_budget: 40000  # max tokens per single pipeline run
-  per_run_call_budget: 80      # max LLM calls per single pipeline run
-```
-
-When the budget is hit, the pipeline returns partial results and logs a warning instead of crashing.
-
-## Project Structure
-
-```
-alphascout/
-├── main.py                  # Entry point, scheduler, CLI
-├── config/
-│   ├── nse_bse_tickers.json # NSE/BSE company name→ticker lookup (~200+ entries)
-│   ├── providers.yaml       # AI provider configs
-│   ├── sectors.yaml         # Sector definitions
-│   ├── settings.yaml        # Trading rules, LLM budget, scheduler config
-│   └── sources.yaml         # 25 news source configs
-├── src/
-│   ├── ai/
-│   │   ├── ensemble.py      # AI ensemble analysis
-│   │   ├── prompts.py       # LLM prompts (4-stage pipeline)
-│   │   └── providers.py     # 6 AI provider integrations + budget tracking
-│   ├── analysis/
-│   │   ├── calibration.py   # Confidence calibration from outcomes
-│   │   └── pipeline.py      # 4-stage Article → Signal pipeline
-│   ├── portfolio/
-│   │   ├── manager.py       # Portfolio & position tracking
-│   │   └── telegram.py      # Telegram delivery (personal-use enforcement)
-│   ├── scraping/
-│   │   └── scraper.py       # Config-driven news scraper
-│   ├── screening/
-│   │   └── screener.py      # NSE/Screener/Trendlyne + spike detection
-│   ├── signals/
-│   │   └── notifier.py      # Signal notifications
-│   ├── universe/
-│   │   ├── builder.py       # Universe builder + on-the-fly expansion + safety filters
-│   │   └── ticker_map.py    # Ticker extraction, mapping, aliases
-│   └── config.py            # Config loader
-├── scripts/
-│   ├── backtest.py          # Backtesting + auto-outcome resolution
-│   ├── setup_credentials.py # Credential setup wizard
-│   └── setup_ve_keys.py     # Voting Exchange keys
-├── data/                    # Runtime data (gitignored)
-│   ├── daily_llm_stats.json # Daily LLM budget tracking
-│   ├── spike_queue.json     # Intra-day spike scan queue
-│   └── unresolved_candidates.jsonl  # Unresolved company names for review
-├── requirements.txt
-└── .env                     # API keys (not committed)
-```
-
-## Architecture
-
-### 4-Stage LLM Pipeline
-
-1. **Quick Filter** — Rejects articles unrelated to our 10 sectors (uses Groq 8B for speed)
-2. **Triage** — Detects catalyst type, strength, time sensitivity, PR/pump risk
-3. **Entity Extraction** — Identifies companies mentioned, extracts financial details
-4. **Impact Analysis** — Predicts price direction, magnitude, and confidence per stock
-
-### Pre-Filter (Issue 1: Real NSE/BSE Lookup)
-
-Articles are filtered before entering the LLM pipeline using a three-layer check:
-1. **Universe tickers** — Fast check against the live 75-stock universe
-2. **NSE/BSE lookup** — Checks against ~200+ known company names/aliases from `config/nse_bse_tickers.json`
-3. **Small-cap keywords** — Catch-all for articles mentioning small-cap stocks not yet in the lookup
-
-### Intra-Day Spike Scanning (Issue 2)
-
-- Runs every 15 minutes during market hours (9:15 AM – 3:30 PM IST)
-- Scans the universe for unusual price/volume spikes using yfinance
-- Queues spiking tickers into `data/spike_queue.json`
-- Mini-analysis pass scrapes news only for queued tickers (lightweight, no full re-scrape)
-
-### SEBI Personal-Use Gate (Issue 3)
-
-- `config/settings.yaml` → `portfolio.personal_use_only: true` (default)
-- When set to `false`, startup is **blocked** unless `I_HAVE_REVIEWED_SEBI_REGULATIONS=true` env var is set
-- Telegram delivery refuses to send to any chat_id other than the configured one in personal-use mode
-
-### Daily LLM Budget Ceiling (Issue 4)
-
-- Budget loaded from `config/settings.yaml` → `llm_budget` section
-- Daily stats persisted to `data/daily_llm_stats.json` (resets on date rollover)
-- Checked before every provider call in `execute_with_fallback`
-- Raises `BudgetExhaustedError` when all providers are exhausted; pipeline catches it and returns partial results
-
-### Risk Management
-
-- `passes_stock_safety_filter()` — shared function used everywhere (universe build, on-the-fly validation, pipeline impact analysis)
-- `check_circuit_history()` — penalizes confidence on recent circuit hits
-- PR/pump detection — requires independent source confirmation; MEDIUM risk rejected from Tier 3-4 sources
-- Auto-outcome resolution scheduled at 9:30 AM IST daily (yfinance price check)
-
-## API Keys
-
-Required (at minimum):
-- **Groq** — Primary AI provider (free tier: 100K tokens/day)
-
-Optional backups:
-- **Cerebras** — Backup AI provider
-- **OpenRouter** — Backup AI provider
-- **Gemini** — Backup AI provider
-- **NVIDIA NIM** — Fast inference
-
-Optional integrations:
-- **Telegram Bot** — Signal delivery (`@AlphaScoutSignals_bot`)
-- **Zerodha Kite** — Auto-execution (needs manual setup)
-
-## 10 Sectors
-
-| Sector | Examples |
-|--------|----------|
-| Defence | Data Patterns, HAL, BEL, Paras Defence |
-| Railways | RVNL, IRFC, IRCTC, Titagarh, Jupiter Wagons |
-| EV | Olectra, JBM Auto, Exide, Amara Raja |
-| Renewables | Waaree, Suzlon, Inox Wind, Borosil Renewable |
-| Infra | KEC, Kalpataru, PNC Infra, HG Infra, Dilip Buildcon |
-| Pharma | Dr Reddy's, Cipla, Laurus Labs, Granules |
-| Chemicals | Navin Fluorine, PI Industries, SRF, Deepak Nitrite |
-| Logistics | Delhivery, Blue Dart, VRL Logistics, TCI |
-| Manufacturing | Dixon, Amber, Kaynes, Netweb, Syrma |
-| IT | Cyient, Coforge, Birlasoft, Persistent Systems |
-
-## License
-
-Private — All rights reserved.
+- **TATAMOTORS.NS and TATAMTRDVR.NS currently return no data from Yahoo
+  Finance.** The system refuses to invent a price, so signals for those two
+  symbols are dropped rather than fabricated. NSE's public API blocks
+  datacenter IPs (HTTP 403) and Stooq does not cover Indian equities, so there
+  is no verified free fallback.
+- Roughly 40% of scraped articles arrive without a publication timestamp and
+  are discarded as unverifiable. Dates are recovered from page metadata for the
+  top 40 enriched articles; raising `scraping.enrich_top_n` widens this at the
+  cost of more HTTP requests.
+- Yahoo Finance is an unofficial interface and occasionally rate-limits.
+- The 20-bar swing support/resistance method is deliberately simple, not
+  order-book derived.

@@ -307,6 +307,61 @@ SOURCES = load_sources_from_config()
 # SCRAPER
 # ─────────────────────────────────────────────────────────────────────────
 
+_PUBLISH_META = [
+    ("property", "article:published_time"),
+    ("property", "og:published_time"),
+    ("name", "article:published_time"),
+    ("name", "pubdate"),
+    ("name", "publish-date"),
+    ("name", "publishdate"),
+    ("name", "DC.date.issued"),
+    ("name", "date"),
+    ("name", "parsely-pub-date"),
+    ("itemprop", "datePublished"),
+]
+
+
+def extract_published(html: str) -> str:
+    """Best-effort publication timestamp from an article page's metadata.
+
+    HTML listing sources yield a headline and URL but no date, so those
+    articles were previously discarded as unverifiable - roughly half the
+    corpus. Enrichment already downloads the full page for the top
+    candidates, so the date is read from that same fetch at no extra cost.
+
+    Returns "" when nothing trustworthy is found, and the caller then treats
+    the article as undated rather than guessing.
+    """
+    if not html:
+        return ""
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        return ""
+
+    for attr, value in _PUBLISH_META:
+        tag = soup.find("meta", attrs={attr: value})
+        if tag and tag.get("content"):
+            content = str(tag["content"]).strip()
+            if content and not content.lower().startswith("0000"):
+                return content
+
+    # JSON-LD carries the most reliable structured date.
+    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        raw = script.string or script.get_text() or ""
+        if "datePublished" not in raw:
+            continue
+        match = re.search(r'"datePublished"\s*:\s*"([^"]+)"', raw)
+        if match:
+            return match.group(1).strip()
+
+    tag = soup.find("time", attrs={"datetime": True})
+    if tag and tag.get("datetime"):
+        return str(tag["datetime"]).strip()
+
+    return ""
+
+
 class NewsScraper:
     def __init__(self):
         self.articles: List[Article] = []
@@ -320,7 +375,7 @@ class NewsScraper:
         logger.info(f"Scraping {len(sources)} sources...")
 
         timeout = aiohttp.ClientTimeout(total=20)
-        connector = aiohttp.TCPConnector(limit=10, ssl=False)
+        connector = aiohttp.TCPConnector(limit=10)
         async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
             tasks = [self._fetch_source(session, src, max_per_source) for src in sources]
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -432,7 +487,7 @@ class NewsScraper:
 
     async def enrich_articles(self, articles: List[Article], max_enrich: int = 15) -> List[Article]:
         timeout = aiohttp.ClientTimeout(total=8)
-        connector = aiohttp.TCPConnector(limit=5, ssl=False)
+        connector = aiohttp.TCPConnector(limit=5)
 
         async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
             async def enrich_one(a: Article) -> Article:
@@ -444,7 +499,9 @@ class NewsScraper:
                             html = await resp.text()
                             a.content = extract_content(html)
                             a.content_hash = hashlib.md5(a.content.encode()).hexdigest()[:16]
-                except:
+                            if not a.published:
+                                a.published = extract_published(html)
+                except Exception:
                     pass
                 return a
 

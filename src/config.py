@@ -38,14 +38,7 @@ def load_sectors() -> Dict[str, Any]:
 
 
 @lru_cache(maxsize=1)
-def load_providers() -> Dict[str, Any]:
-    """Load providers.yaml"""
-    path = CONFIG_DIR / "providers.yaml"
-    with open(path) as f:
-        return yaml.safe_load(f)
 
-
-@lru_cache(maxsize=1)
 def load_sources() -> Dict[str, Any]:
     """Load sources.yaml"""
     path = CONFIG_DIR / "sources.yaml"
@@ -108,22 +101,7 @@ def get_all_sector_keywords() -> Dict[str, list]:
     return result
 
 
-def get_provider_config(provider: str) -> dict:
-    """Get provider configuration"""
-    providers = load_providers()
-    return providers.get("providers", {}).get(provider, {})
 
-
-def get_task_routing(task: str) -> dict:
-    """Get routing config for a task"""
-    providers = load_providers()
-    return providers.get("task_routing", {}).get(task, {})
-
-
-def get_ensemble_config() -> dict:
-    """Get ensemble configuration"""
-    providers = load_providers()
-    return providers.get("ensemble", {})
 
 
 def get_tokens_config() -> dict:
@@ -231,7 +209,6 @@ def get_pipeline_config() -> dict:
 __all__ = [
     "load_settings",
     "load_sectors",
-    "load_providers",
     "load_sources",
     "get_setting",
     "get_enabled_sources",
@@ -239,9 +216,6 @@ __all__ = [
     "get_sector_keywords",
     "get_sector_tickers",
     "get_all_sector_keywords",
-    "get_provider_config",
-    "get_task_routing",
-    "get_ensemble_config",
     "get_tokens_config",
     "validate_api_keys",
     "get_risk_config",

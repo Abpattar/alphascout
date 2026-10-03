@@ -1,4 +1,3 @@
-# AlphaScout
 venv/
 __pycache__/
 *.pyc
@@ -6,12 +5,12 @@ __pycache__/
 .env
 credentials.enc
 *.log
+run.log
 data/*.json
 data/*.pkl
 data/*.jsonl
 data/*.db
 data/price_history/
-data/run_*.log
 *.enc
 *.db
 IDE/

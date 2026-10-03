@@ -172,34 +172,6 @@ def resolve_outcomes(days: int = 30, batch_size: int = 20, min_age_days: int = 1
     return {"resolved": resolved, "skipped": skipped, "errors": errors}
 
 
-def run_backtest_replay(days: int = 30, max_articles: int = 50, max_signals: int = 10) -> List[Dict]:
-    """Replay stored articles through the pipeline and generate new signals."""
-    from src.scraping.scraper import scrape_all_sources
-    from src.analysis.pipeline import analyze_articles
-
-    db = get_db()
-    articles = db.get_recent_articles(hours=days * 24, limit=max_articles)
-    print(f"\nReplaying {len(articles)} stored articles through pipeline...")
-
-    # Convert DB articles back to dict format for pipeline
-    article_dicts = []
-    for a in articles:
-        article_dicts.append({
-            "title": a["title"],
-            "url": a["url"],
-            "source": a["source"],
-            "category": a["category"],
-            "content": a["content"],
-            "summary": a["summary"],
-            "published": a["published_at"],
-            "fetched_at": a["scraped_at"],
-        })
-
-    signals = analyze_articles(article_dicts, max_signals=max_signals)
-    print(f"Generated {len(signals)} signals from replay")
-
-    return signals
-
 
 def show_results() -> Dict:
     """Display backtest results from stored outcomes."""
@@ -315,20 +287,14 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="AlphaScout Backtest Harness")
     parser.add_argument("action", nargs="?", default="resolve",
-                        choices=["resolve", "replay", "results"],
-                        help="resolve=fetch outcomes, replay=re-run pipeline, results=show metrics")
+                         choices=["resolve", "results"],
+                         help="resolve=fetch outcomes from market history, results=show metrics")
     parser.add_argument("--days", type=int, default=30,
                         help="Lookback period in days")
-    parser.add_argument("--max-articles", type=int, default=50,
-                        help="Max articles for replay")
-    parser.add_argument("--max-signals", type=int, default=10,
-                        help="Max signals for replay")
     args = parser.parse_args()
 
     if args.action == "resolve":
         resolve_outcomes(days=args.days)
-    elif args.action == "replay":
-        run_backtest_replay(days=args.days, max_articles=args.max_articles, max_signals=args.max_signals)
     elif args.action == "results":
         show_results()
 

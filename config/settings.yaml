@@ -188,7 +188,7 @@ scraping:
     - "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
     - "Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0"
   dedupe_threshold: 0.85
-  enrich_top_n: 15
+  enrich_top_n: 40
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MANUAL HOLDINGS (Telegram buy/sell tracking + reminders)

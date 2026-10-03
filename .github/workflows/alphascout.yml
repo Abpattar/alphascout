@@ -1,46 +1,53 @@
 name: AlphaScout Daily Run
 
-"on":
+# Times below are IST (Asia/Kolkata). Both runs happen before the Indian
+# market opens, so every price is reported as PREVIOUS CLOSE, never as live.
+on:
   schedule:
-    # Times below are IST (Asia/Kolkata), not UTC.
-    - cron: "0 4 * * *"       # 04:00 IST — overnight news scan
+    - cron: "0 4 * * *"        # 04:00 IST - overnight news scan
       timezone: "Asia/Kolkata"
-    - cron: "0 7 * * *"       # 07:00 IST — pre-market news scan
+    - cron: "0 7 * * *"        # 07:00 IST - pre-market news scan
       timezone: "Asia/Kolkata"
   workflow_dispatch:
     inputs:
-      signals:
-        description: "Max signals to generate"
+      dry_run:
+        description: "Run everything but do not send Telegram messages"
         required: false
-        default: "5"
-      mode:
-        description: "Pipeline mode"
+        default: "false"
+        type: boolean
+      max_signals:
+        description: "Max signals to send (hard cap 3)"
         required: false
-        default: "run"
-        type: choice
-        options:
-          - run
-          - scan
+        default: "3"
+      freshness_hours:
+        description: "Reject articles older than this"
+        required: false
+        default: "30"
 
-# Never let two AlphaScout runs overlap. If one is already running,
-# a newly triggered run queues until it finishes (nothing is cancelled).
+# One run at a time. State is committed back to the repo, so two runs writing
+# state concurrently would race on the same JSONL files.
 concurrency:
   group: alphascout
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write   # required to commit state/*.jsonl back to the repository
   actions: read
 
 jobs:
   alphascout:
     name: AlphaScout
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 45
 
     steps:
       - name: Checkout latest code
         uses: actions/checkout@v4
+        with:
+          # The state commit is on a bot branch; a detached shallow clone
+          # cannot push back.
+          fetch-depth: 0
+          ref: main
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -51,36 +58,20 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # Guardian: skip late/duplicate AUTO runs (schedule + watchdog triggers only).
-      # Manual launches from the Actions page always run, so you can test anytime.
-      - name: Dedupe guard (skip if AlphaScout already succeeded recently)
-        id: dedupe
-        run: |
-          skip=false
-          recent=0
-          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event.inputs.reason }}" = "watchdog" ]; then
-            # Window must stay well under the 180-min gap between the 04:00 and
-            # 07:00 IST slots, or the 07:00 run counts the 04:00 run as
-            # "recent" and skips itself. 60 min still absorbs a late GitHub
-            # cron firing after its own 04:20/07:20 watchdog.
-            since="$(date -u -d '60 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
-            recent="$(
-              gh api \
-                "repos/${{ github.repository }}/actions/runs?workflow_id=alphascout.yml&created=>=$since" \
-                --jq '[.workflow_runs[] | select(.status == "completed" and .conclusion == "success")] | length'
-            )"
-            if [ "${recent:-0}" -gt 0 ]; then
-              skip=true
-            fi
-          fi
-          echo "recent_successful_runs=${recent:-0}"
-          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+      # Loads state/*.jsonl into the store. If this fails the run aborts:
+      # running without memory would mean re-sending yesterday's news.
+      - name: Preflight (store + credentials + market session)
         env:
-          GH_TOKEN: ${{ github.token }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py --health
 
       - name: Run AlphaScout
-        if: steps.dedupe.outputs.skip != 'true'
         env:
+          MODE: ${{ github.event.inputs.dry_run || 'false' }}
+          MAX_SIGNALS: ${{ github.event.inputs.max_signals || '3' }}
+          FRESH: ${{ github.event.inputs.freshness_hours || '30' }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
           GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
@@ -95,12 +86,36 @@ jobs:
           NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          KITE_API_KEY: ${{ secrets.KITE_API_KEY }}
-          KITE_API_SECRET: ${{ secrets.KITE_API_SECRET }}
-          KITE_ACCESS_TOKEN: ${{ secrets.KITE_ACCESS_TOKEN }}
-          TRADING_CAPITAL: ${{ secrets.TRADING_CAPITAL }}
+          ALPHASCOUT_STORE: ${{ vars.ALPHASCOUT_STORE || 'git' }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          ALPHASCOUT_LOG_LEVEL: INFO
         run: |
-          mode="${{ inputs.mode || 'run' }}"
-          signals="${{ inputs.signals || '5' }}"
-          echo "Running AlphaScout: mode=$mode signals=$signals"
-          python main.py "$mode" --no-cache --signals "$signals"
+          set -o pipefail
+          args=(--signals "$MAX_SIGNALS" --freshness-hours "$FRESH")
+          if [ "$MODE" = "true" ]; then args+=(--dry-run); fi
+          python main.py run "${args[@]}" 2>&1 | tee run.log
+          echo "### AlphaScout run log ###" >> "$GITHUB_STEP_SUMMARY"
+          cat run.log >> "$GITHUB_STEP_SUMMARY"
+
+      # Durability. Without this the next run starts blind and re-sends
+      # everything already delivered.
+      - name: Commit state
+        if: always()
+        run: |
+          git config user.name  "alphascout-bot"
+          git config user.email "alphascout-bot@users.noreply.github.com"
+          git add state/ 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No state changes to commit."
+            exit 0
+          fi
+          git commit -m "state: $(date -u '+%Y-%m-%d %H:%M UTC') run checkpoint" || exit 0
+          for i in 1 2 3; do
+            if git push origin HEAD:main; then exit 0; fi
+            echo "push attempt $i failed (likely concurrent push); rebasing"
+            git pull --rebase origin main || exit 0
+            sleep 5
+          done
+          echo "WARNING: could not persist state; next run may repeat signals."
+          exit 0

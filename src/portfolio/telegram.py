@@ -20,11 +20,22 @@ try:
 except ImportError:
     pass
 
-SSL_CTX = ssl.create_default_context()
-SSL_CTX.check_hostname = False
-SSL_CTX.verify_mode = ssl.CERT_NONE
-
 logger = logging.getLogger(__name__)
+
+
+# TLS verification is ON. This context carries the bot token and every message
+# body, and disabling verification (as this file previously did with
+# check_hostname=False / CERT_NONE) exposes both to interception.
+# Escape hatch for a broken trust store:
+#   ALPHASCOUT_INSECURE_TLS=1
+
+SSL_CTX = ssl.create_default_context()
+if os.getenv("ALPHASCOUT_INSECURE_TLS", "").strip().lower() in ("1", "true", "yes", "on"):
+    SSL_CTX.check_hostname = False
+    SSL_CTX.verify_mode = ssl.CERT_NONE
+    logger.warning(
+        "ALPHASCOUT_INSECURE_TLS is set: Telegram certificate verification is DISABLED"
+    )
 
 
 def _esc(value) -> str:
