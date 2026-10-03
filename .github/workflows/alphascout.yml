@@ -3,9 +3,10 @@ name: AlphaScout Daily Run
 "on":
   schedule:
     # Times below are IST (Asia/Kolkata), not UTC.
-    - cron: "0 4 * * *"  # 04:00 IST — overnight news scan
-    - cron: "0 7 * * *"  # 07:00 IST — pre-market news scan
-  timezone: "Asia/Kolkata"
+    - cron: "0 4 * * *"       # 04:00 IST — overnight news scan
+      timezone: "Asia/Kolkata"
+    - cron: "0 7 * * *"       # 07:00 IST — pre-market news scan
+      timezone: "Asia/Kolkata"
   workflow_dispatch:
     inputs:
       signals:

@@ -6,9 +6,10 @@ name: AlphaScout Watchdog
 # guard, so a late GitHub cron run can't double-send Telegram.
 "on":
   schedule:
-    - cron: "20 4 * * *"  # 04:20 IST — 20 min after the 04:00 slot
-    - cron: "20 7 * * *"  # 07:20 IST — 20 min after the 07:00 slot
-  timezone: "Asia/Kolkata"
+    - cron: "20 4 * * *"      # 04:20 IST — 20 min after the 04:00 slot
+      timezone: "Asia/Kolkata"
+    - cron: "20 7 * * *"      # 07:20 IST — 20 min after the 07:00 slot
+      timezone: "Asia/Kolkata"
   workflow_dispatch:
 
 permissions:
