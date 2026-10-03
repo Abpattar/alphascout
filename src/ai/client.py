@@ -117,6 +117,7 @@ class AIClient:
         registry = self._get_registry()
         current_prompt = prompt
         last_error = ""
+        self.last_error = ""
 
         for attempt in range(1, max_attempts + 1):
             self.calls += 1
@@ -135,6 +136,7 @@ class AIClient:
 
             if not raw:
                 last_error = "empty response"
+                self.last_error = last_error
                 logger.info("AI returned nothing (attempt %d)", attempt)
             else:
                 parsed = extract_json(raw if isinstance(raw, str) else json.dumps(raw))
@@ -145,6 +147,7 @@ class AIClient:
                         logger.info("Dropped forbidden numeric keys from AI output: %s", dropped)
                     return cleaned
                 last_error = "response was not valid JSON"
+                self.last_error = last_error
 
             if attempt < max_attempts:
                 current_prompt = (

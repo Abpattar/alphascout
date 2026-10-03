@@ -119,7 +119,6 @@ def validate_api_keys() -> Dict[str, bool]:
         "GROQ_API_KEY_4": os.getenv("GROQ_API_KEY_4"),
         "GROQ_API_KEY_5": os.getenv("GROQ_API_KEY_5"),
         "OPENROUTER_API_KEY": os.getenv("OPENROUTER_API_KEY"),
-        "CEREBRAS_API_KEY": os.getenv("CEREBRAS_API_KEY"),
         "GEMINI_API_KEY": os.getenv("GEMINI_API_KEY"),
         "KITE_API_KEY": os.getenv("KITE_API_KEY"),
         "KITE_API_SECRET": os.getenv("KITE_API_SECRET"),
@@ -133,9 +132,8 @@ def validate_api_keys() -> Dict[str, bool]:
 
     return {
         "groq": len(groq_keys) > 0,
-        "groq_key_count": len(groq_keys),
+        "groq_key_count": sum(1 for k in keys if k.startswith("GROQ_API_KEY") and keys[k]),
         "openrouter": bool(keys["OPENROUTER_API_KEY"]),
-        "cerebras": bool(keys["CEREBRAS_API_KEY"]),
         "gemini": bool(keys["GEMINI_API_KEY"]),
         "kite": all([keys["KITE_API_KEY"], keys["KITE_API_SECRET"], keys["KITE_ACCESS_TOKEN"]]),
         "telegram": all([keys["TELEGRAM_BOT_TOKEN"], keys["TELEGRAM_CHAT_ID"]]),

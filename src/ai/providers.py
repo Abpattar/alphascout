@@ -1,6 +1,6 @@
 """
 AI Provider Abstraction Layer
-Unified interface for Groq, OpenRouter, Cerebras, Gemini with auto-fallback
+Unified interface for Groq, OpenRouter and Gemini with auto-fallback
 """
 import os
 import json
@@ -25,6 +25,9 @@ from src.netfix import force_ipv4  # noqa: E402
 force_ipv4()
 
 logger = logging.getLogger(__name__)
+
+# Groq keys read from GROQ_API_KEY_2 .. _GROQ_KEY_SLOTS-1
+GROQ_KEY_SLOTS = 10
 
 
 class RateLimitError(Exception):
@@ -308,7 +311,7 @@ class GroqMultiKeyProvider:
         if key:
             keys.append(key)
         # Additional keys (2-8)
-        for i in range(2, 9):
+        for i in range(2, GROQ_KEY_SLOTS):
             key = os.environ.get(f"GROQ_API_KEY_{i}")
             if key:
                 keys.append(key)
@@ -437,55 +440,6 @@ class OpenRouterProvider(BaseProvider):
             raise ProviderError(f"OpenRouter error: {e}")
 
 
-class CerebrasProvider(BaseProvider):
-    """Cerebras API - Fast inference"""
-
-    def __init__(self, api_key: str, model: str = "gpt-oss-120b"):
-        super().__init__(api_key, f"cerebras:{model}")
-        self.model = model
-        self.base_url = "https://api.cerebras.ai/v1/chat/completions"
-        import requests
-        self.session = requests.Session()
-        self.session.headers.update({
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        })
-
-    def generate(
-        self,
-        prompt: str,
-        system: str = "",
-        max_tokens: int = 2000,
-        temperature: float = 0.1
-    ) -> Optional[Dict]:
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": False
-        }
-
-        try:
-            resp = self.session.post(self.base_url, json=payload, timeout=20)
-            if resp.status_code == 429:
-                raise RateLimitError("Cerebras rate limited")
-
-            resp.raise_for_status()
-            data = resp.json()
-            content = data["choices"][0]["message"]["content"]
-            self._track_call(success=True)
-            return self._parse_json(content)
-        except RateLimitError:
-            self._track_call(success=False, error="429")
-            raise
-        except Exception as e:
-            self._track_call(success=False, error=str(e))
-            raise ProviderError(f"Cerebras error: {e}")
-
 
 class GeminiProvider(BaseProvider):
     """Google Gemini API via REST"""
@@ -545,57 +499,6 @@ class GeminiProvider(BaseProvider):
             raise ProviderError(f"Gemini error: {e}")
 
 
-class NVIDIANIMProvider(BaseProvider):
-    """NVIDIA NIM API - Fast free inference"""
-
-    def __init__(self, api_key: str, model: str = "meta/llama-3.1-70b-instruct"):
-        super().__init__(api_key, f"nvidia_nim:{model}")
-        self.model = model
-        self.base_url = "https://integrate.api.nvidia.com/v1/chat/completions"
-        import requests
-        self.session = requests.Session()
-        self.session.headers.update({
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        })
-
-    def generate(
-        self,
-        prompt: str,
-        system: str = "",
-        max_tokens: int = 2000,
-        temperature: float = 0.1
-    ) -> Optional[Dict]:
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
-
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": False
-        }
-
-        try:
-            resp = self.session.post(self.base_url, json=payload, timeout=20)
-            if resp.status_code == 429:
-                raise RateLimitError("NVIDIA NIM rate limited")
-
-            resp.raise_for_status()
-            data = resp.json()
-            content = data["choices"][0]["message"]["content"]
-            self._track_call(success=True)
-            return self._parse_json(content)
-        except RateLimitError:
-            self._track_call(success=False, error="429")
-            raise
-        except Exception as e:
-            self._track_call(success=False, error=str(e))
-            raise ProviderError(f"NVIDIA NIM error: {e}")
-
 
 class ProviderRegistry:
     """Manages all providers with routing and fallback"""
@@ -638,15 +541,7 @@ class ProviderRegistry:
             except Exception as e:
                 logger.warning(f"OpenRouter init failed: {e}")
 
-        # Cerebras
-        if os.environ.get("CEREBRAS_API_KEY"):
-            try:
-                self.providers["cerebras"] = CerebrasProvider(
-                    os.environ["CEREBRAS_API_KEY"],
-                    "gpt-oss-120b"
-                )
-            except Exception as e:
-                logger.warning(f"Cerebras init failed: {e}")
+        # Cerebras removed: no usable free tier (402 Payment Required).
 
         # Gemini
         if os.environ.get("GEMINI_API_KEY"):
@@ -658,23 +553,15 @@ class ProviderRegistry:
             except Exception as e:
                 logger.warning(f"Gemini init failed: {e}")
 
-        # NVIDIA NIM
-        if os.environ.get("NVIDIA_NIM_API_KEY"):
-            try:
-                self.providers["nvidia_nim"] = NVIDIANIMProvider(
-                    os.environ["NVIDIA_NIM_API_KEY"],
-                    "meta/llama-3.1-70b-instruct"
-                )
-            except Exception as e:
-                logger.warning(f"NVIDIA NIM init failed: {e}")
+        # NVIDIA NIM removed: endpoint retired (410 Gone).
 
         # Build routing — prioritize fast providers
         self.routing = {
-            "triage": ["groq_8b", "groq_70b", "gemini", "cerebras"],
+            "triage": ["groq_8b", "gemini", "groq_70b", "openrouter"],
             "entity_extraction": ["groq_8b", "gemini", "groq_70b", "openrouter"],
-            "impact_analysis": ["groq_70b", "gemini", "groq_8b", "cerebras"],
+            "impact_analysis": ["groq_70b", "gemini", "groq_8b", "openrouter"],
             "trade_setup": ["groq_70b", "gemini", "groq_8b", "openrouter"],
-            "quick_filter": ["groq_8b", "gemini", "groq_70b", "cerebras"]
+            "quick_filter": ["groq_8b", "gemini", "groq_70b", "openrouter"]
         }
 
         logger.info(f"Initialized providers: {list(self.providers.keys())}")
@@ -842,7 +729,9 @@ class ProviderRegistry:
                 f"{self._daily_stats['tokens_est']}/{self._daily_budget['tokens']} est tokens"
             )
 
-        route = self.routing.get(task_type, ["groq_70b", "cerebras", "openrouter", "gemini"])
+        route = self.routing.get(
+            task_type, ["groq_70b", "gemini", "groq_8b", "openrouter"]
+        )
         results = []
 
         for provider_name in route:

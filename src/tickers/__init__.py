@@ -23,7 +23,8 @@ import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set
+from difflib import SequenceMatcher
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from src.market.quotes import VALID_SUFFIXES, normalise_ticker
 
@@ -291,6 +292,31 @@ def _alias_lookup() -> Dict[str, str]:
     return out
 
 
+def _name_affinity(query: str, returned: str) -> float:
+    """How well a provider-returned company name matches the query.
+
+    Uses the best of whole-string similarity and token overlap. The token
+    check matters because providers return legal suffixes ("R SYS
+    INTERNATIONAL LTD" for "R Systems International") that punish a plain
+    edit-distance ratio.
+    """
+    if not query or not returned:
+        return 0.0
+    if query == returned:
+        return 1.0
+    seq = SequenceMatcher(None, query, returned).ratio()
+    q_tokens = set(query.split())
+    r_tokens = set(returned.split())
+    # Corporate words carry no identity and would inflate the overlap.
+    q_core = q_tokens - set(_SUFFIXES)
+    r_core = r_tokens - set(_SUFFIXES)
+    if q_core and r_core:
+        overlap = len(q_core & r_core) / max(len(q_core), len(r_core))
+    else:
+        overlap = 0.0
+    return max(seq, overlap)
+
+
 @dataclass(frozen=True)
 class Resolution:
     """Outcome of a ticker lookup."""
@@ -347,7 +373,50 @@ class TickerResolver:
             return Resolution(resolved, name.strip(), method, verified=False)
         return None
 
-    # -- stage 3: authority ------------------------------------------------
+    # -- stage 4: name search (discovery) ---------------------------------
+    def _search_by_name(self, name: str) -> Optional[Resolution]:
+        """Look a company up by name against the live listing universe.
+
+        This is what makes the system open-ended: a company absent from every
+        curated table still resolves, as long as a real NSE/BSE listing exists
+        under roughly that name.
+
+        Safety: results are restricted to ``.NS``/``.BO`` symbols, and the
+        name the provider returns must actually resemble the query. Without
+        that second check a search for "Swiggy" would happily return some
+        unrelated large cap whose name shares a few characters.
+        """
+        query = _normalise_name(name)
+        if len(query) < 4:
+            return None
+
+        try:
+            import yfinance as yf
+
+            quotes = (yf.Search(query, max_results=8).quotes or [])
+        except Exception as exc:
+            logger.info("Name search failed for %r: %s", name, exc)
+            return None
+
+        best: Optional[Tuple[float, str, str]] = None
+        for item in quotes:
+            symbol = str(item.get("symbol") or "").upper()
+            if not symbol.endswith(VALID_SUFFIXES):
+                continue
+            returned = str(item.get("longname") or item.get("shortname") or "")
+            score = _name_affinity(query, _normalise_name(returned))
+            if score < 0.55:
+                continue
+            if best is None or score > best[0]:
+                best = (score, symbol, returned or name.strip())
+
+        if best is None:
+            return None
+
+        _, symbol, returned = best
+        logger.info("Name search: %r -> %s (%s)", name.strip(), symbol, returned)
+        return Resolution(symbol, returned or name.strip(), "name_search", verified=False)
+
     def _confirm(self, resolution: Resolution) -> Optional[Resolution]:
         """Ask the market-data source whether this symbol really exists."""
         if not self.verify_live:
@@ -380,16 +449,25 @@ class TickerResolver:
 
     # -- public ------------------------------------------------------------
     def resolve(self, name: str) -> Optional[Resolution]:
-        """Full funnel. ``None`` when the company cannot be pinned down."""
+        """Full funnel. ``None`` when the company cannot be pinned down.
+
+        curated table -> alias table -> live name search -> market-data
+        confirmation.
+        """
         if not name:
             return None
         if name in self._rejected:
             return None
 
-        if not _normalise_name(name):
+        norm = _normalise_name(name)
+        if not norm:
             return None
 
-        proposal = self.propose(name)
+        proposal = self.propose(norm)
+        if proposal is None:
+            if norm in _AMBIGUOUS:
+                return None
+            proposal = self._search_by_name(name)
         if proposal is None:
             return None
         return self._confirm(proposal)

@@ -68,6 +68,12 @@ MIN_RELEVANCE_SCORE = 62
 # earlier the same day. New developments bypass it entirely.
 DEFAULT_TICKER_COOLDOWN_HOURS = 12
 
+# Minimum market cap (crore) for a company to be signalled. Name search can
+# surface a real but micro-cap listing whose name happens to resemble the
+# query; those are not tradeable research targets and must not become
+# signals. Anything smaller is dropped with a reason, never priced.
+MIN_MARKET_CAP_CR = 50.0
+
 # Event types that are commentary about the market rather than news about a
 # company. An analyst's "top 3 stocks to buy" is a view, not an event, and
 # acting on it means trading on someone else's opinion.
@@ -128,6 +134,7 @@ class RunStats:
         self.articles_noise = 0
         self.rejected_non_catalyst = 0
         self.rejected_non_directional = 0
+        self.rejected_microcap = 0
         self.rejected_low_relevance = 0
         self.stories_clustered = 0
         self.stories_new = 0
@@ -165,6 +172,7 @@ class RunStats:
         logger.info("  low relevance      : %d", self.rejected_low_relevance)
         logger.info("  non-catalyst       : %d", self.rejected_non_catalyst)
         logger.info("  non-directional    : %d", self.rejected_non_directional)
+        logger.info("  micro-cap          : %d", self.rejected_microcap)
         logger.info("market data ok       : %d", self.market_ok)
         logger.info("market unavailable   : %d", self.market_unavailable)
         logger.info("validated ok         : %d", self.validated_ok)
@@ -301,6 +309,10 @@ class NewsSignalPipeline:
         self.ticker_allowlist = ticker_allowlist or None
         self.min_relevance = min_relevance
         self.non_catalyst_events = non_catalyst_events or NON_CATALYST_EVENT_TYPES
+        # Per-run caches. A company is only asked about once, and a verified
+        # discovery is reused for the rest of the run.
+        self._discovery_attempted: set = set()
+        self._discovery_cache: Dict[str, Resolution] = {}
         self.stats = RunStats()
 
     # -- history ----------------------------------------------------------
@@ -531,8 +543,31 @@ class NewsSignalPipeline:
 
     # -- step 4: resolve verified Indian companies ------------------------
     def _resolve_companies(self, candidate: Candidate) -> Optional[Resolution]:
+        """Find the Indian-listed company this story is really about.
+
+        Two stages, cheapest first:
+
+        1. **Curated tables.** ``config/nse_bse_tickers.json``, the alias table
+           and the sector keywords. Free, no LLM, covers the large majority of
+           mainstream coverage.
+        2. **Discovery.** If nothing matched, ask the model which *company
+           names* the article mentions - names only, never tickers - then
+           verify each against a real NSE/BSE listing. This is what lets a
+           newly-listed or simply less-famous company be picked up instead of
+           silently dropped.
+
+        Stage 2 is why the system is not limited to a fixed watchlist. The
+        model proposes a name; :mod:`src.tickers` decides whether that name is
+        a real Indian listing with a real price. A name that fails
+        verification is discarded, so a hallucinated company cannot produce a
+        signal.
+        """
         haystack = f"{candidate.title} {candidate.content[:1500]} {candidate.summary}"
+
         resolutions = self.resolver.resolve_from_text(haystack)
+        if not resolutions:
+            resolutions = self._discover_companies(candidate, haystack)
+
         if not resolutions:
             return None
         # Prefer the largest verified listing when a story names several.
@@ -543,9 +578,90 @@ class NewsSignalPipeline:
                 cap = quote.market_cap_cr if quote else 0.0
                 if best is None or cap > best[0]:
                     best = (cap, resolution)
-        if best:
-            return best[1]
-        return None
+        return best[1] if best else None
+
+    def _discover_companies(
+        self, candidate: Candidate, haystack: str
+    ) -> List[Resolution]:
+        """Stage 2: ask the model for company names, then verify them for real.
+
+        The model returns *names*, never symbols. Every name is checked against
+        the curated tables and then against a live quote, so the ticker that
+        ends up on a signal was never taken from the model's output.
+        """
+        # One discovery attempt per story, keyed on its stable identity.
+        if candidate.story_key in self._discovery_attempted:
+            return []
+        self._discovery_attempted.add(candidate.story_key)
+
+        names = self._candidate_entity_names(haystack)
+        if not names:
+            return []
+
+        logger.info(
+            "No curated match; asking the model to identify companies among %s",
+            ", ".join(names[:6]),
+        )
+        prompt = (
+            "Which of these organisations, if any, are Indian-listed companies "
+            "(NSE or BSE)?\n\n"
+            f"NAMES: {', '.join(names[:12])}\n\n"
+            f"ARTICLE: {candidate.title}\n{(candidate.content or '')[:1200]}\n\n"
+            'Return JSON: {"companies": ["exact name as written", ...]}\n'
+            "Include a name only if it is an Indian-listed operating company, "
+            "not a government body, regulator, index, fund or news outlet. "
+            "Return an empty list if none qualify. Do not output tickers."
+        )
+        result = self.ai.ask_json(interpret.SYSTEM, prompt, max_tokens=400)
+        proposed = (result or {}).get("companies") or []
+        if not isinstance(proposed, list):
+            return []
+
+        verified: List[Resolution] = []
+        for raw in proposed[:6]:
+            if not isinstance(raw, str) or len(raw) < 3:
+                continue
+            resolution = self.resolver.resolve(raw.strip())
+            if resolution and resolution.verified:
+                logger.info(
+                    "Discovered and verified: %s -> %s (%s)",
+                    raw.strip(), resolution.ticker, resolution.method,
+                )
+                self._discovery_cache[raw.strip().lower()] = resolution
+                verified.append(resolution)
+            else:
+                logger.info(
+                    "Model proposed %r but it is not a verified Indian listing",
+                    raw.strip(),
+                )
+        return verified
+
+    @staticmethod
+    def _candidate_entity_names(haystack: str) -> List[str]:
+        """Capitalised tokens worth asking about, excluding obvious noise."""
+        stop = {
+            "NSE", "BSE", "SEBI", "RBI", "GST", "IPO", "Q1", "Q2", "Q3", "Q4",
+            "FY", "Cr", "Crore", "Lakh", "Rs", "INR", "US", "UK", "EU", "GDP",
+            "CPI", "WPI", "II", "III", "IV", "NEW", "THE", "AND", "FOR", "WITH",
+            "PM", "CEO", "CFO", "MD", "TV", "AI", "EV", "PMO", "GDP",
+        }
+        found: List[str] = []
+        seen = set()
+        for token in haystack.replace("\n", " ").split():
+            cleaned = "".join(ch for ch in token if ch.isalnum())
+            if len(cleaned) < 4 or not cleaned[0].isupper():
+                continue
+            upper = cleaned.upper()
+            if upper in stop or cleaned.lower() in seen:
+                continue
+            # Fiscal-year and quarter labels: FY27, FY2027, Q1-Q4.
+            if re.fullmatch(r"FY\d{2,4}", upper) or re.fullmatch(r"Q[1-4]", upper):
+                continue
+            seen.add(cleaned.lower())
+            found.append(cleaned)
+            if len(found) >= 12:
+                break
+        return found
 
     # -- step 5: market context (real numbers, fetched before AI) ---------
     def _market_context(self, ticker: str) -> Optional[Dict[str, Any]]:
@@ -790,6 +906,15 @@ class NewsSignalPipeline:
                 )
                 continue
             self.stats.market_ok += 1
+            quote_preview = self.market.get_quote(resolution.ticker)
+            if quote_preview is not None and 0 < quote_preview.market_cap_cr < MIN_MARKET_CAP_CR:
+                self.stats.rejected_microcap += 1
+                logger.info(
+                    "%s market cap Rs%.0f Cr is below the Rs%.0f Cr floor - not a "
+                    "signal candidate", resolution.ticker,
+                    quote_preview.market_cap_cr, MIN_MARKET_CAP_CR,
+                )
+                continue
             context["resolution"] = resolution
 
             self.stats.ai_assessed += 1

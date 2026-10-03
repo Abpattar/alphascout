@@ -80,10 +80,9 @@ jobs:
           GROQ_API_KEY_6: ${{ secrets.GROQ_API_KEY_6 }}
           GROQ_API_KEY_7: ${{ secrets.GROQ_API_KEY_7 }}
           GROQ_API_KEY_8: ${{ secrets.GROQ_API_KEY_8 }}
+          GROQ_API_KEY_9: ${{ secrets.GROQ_API_KEY_9 }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           ALPHASCOUT_STORE: ${{ vars.ALPHASCOUT_STORE || 'git' }}
