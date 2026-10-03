@@ -489,6 +489,10 @@ class AnalysisPipeline:
         triage_fields = {f.name for f in _dc.fields(TriageResult)}
         filtered = {k: v for k, v in result.items() if k in triage_fields}
         # Defaults for required fields that reasoning models sometimes skip
+        filtered.setdefault("catalyst_type", "OTHER")
+        filtered.setdefault("time_sensitivity", "MEDIUM")
+        filtered.setdefault("event_summary", article.get("title", "")[:200])
+        filtered.setdefault("money_involved", "null")
         filtered.setdefault("product_category", "unknown")
         filtered.setdefault("named_companies", [])
         filtered.setdefault("implied_companies", [])
