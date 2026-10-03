@@ -107,6 +107,34 @@ def cmd_health() -> int:
     status = market_status()
     print(f"market session : {status.session} - {status.label}")
     print(f"price kind     : {status.price_kind}")
+
+    # AI providers are probed for real: a dead key silently halves the
+    # fallback chain, which shows up only as unexplained AI failures.
+    try:
+        from src.ai.providers import get_registry
+
+        registry = get_registry()
+        print("\nAI providers (live probe):")
+        usable = 0
+        for name, outcome in sorted(registry.probe_providers().items()):
+            if outcome == "ok":
+                usable += 1
+                print(f"  OK       {name}")
+            else:
+                print(f"  DEAD     {name:14} {outcome}")
+        print(f"  -> {usable} provider(s) actually usable")
+        if usable < 2:
+            print(
+                "  WARNING: fewer than 2 usable AI providers. Groq's free tier "
+                "rate-limits hard, so a single working provider means most "
+                "articles will be skipped for 'AI failed'. Free keys for the "
+                "dead providers above would restore redundancy."
+            )
+        if usable == 0:
+            ok = False
+    except Exception as exc:
+        print(f"AI probe failed: {exc}")
+
     return 0 if ok else 1
 
 

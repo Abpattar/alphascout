@@ -606,6 +606,7 @@ class ProviderRegistry:
         # Issue 4: daily budget ceiling
         self._daily_budget: Dict[str, int] = {}
         self._daily_stats: Dict[str, int] = {"calls": 0, "tokens_est": 0}
+        self._disabled_providers: Dict[str, str] = {}
         self._stats_lock = Lock()  # concurrent worker threads share the budget counters
         self._daily_stats_path = Path(__file__).parent.parent.parent / "data" / "daily_llm_stats.json"
         self._initialize()
@@ -783,6 +784,43 @@ class ProviderRegistry:
         else:
             return self.execute_with_fallback(task_type, prompt, system, max_tokens, temperature)
 
+    # ── provider circuit breaker ────────────────────────────────────────
+    # A provider returning 401/402/410 is not rate-limited, it is unusable:
+    # the key is dead or the endpoint retired. Retrying it on every call just
+    # burns latency and hides the fact that the fallback chain is shorter
+    # than it looks. Such a provider is disabled for the rest of the process.
+    _DEAD_ERROR_MARKERS = (401, 402, 403, 410, "payment required",
+                           "unauthorized", "forbidden", "gone")
+
+    def _is_dead_error(self, error: Exception) -> bool:
+        text = str(error).lower()
+        if isinstance(error, RateLimitError):
+            return False
+        return any(marker in text for marker in self._DEAD_ERROR_MARKERS)
+
+    def disabled_providers(self) -> Dict[str, str]:
+        """Providers auto-disabled this run, with the reason."""
+        return dict(self._disabled_providers)
+
+    def probe_providers(self) -> Dict[str, str]:
+        """Send one tiny request per provider to report which are usable.
+
+        Used by `main.py health` so a dead provider is visible before it
+        silently halves the system's assessment throughput.
+        """
+        results: Dict[str, str] = {}
+        # Enough room for a complete JSON object: a tight token cap truncates
+        # the response mid-object and the parse then fails, which looks
+        # identical to a dead provider.
+        probe = 'Return exactly this JSON object and nothing else: {"ok": true}'
+        for name, provider in self.providers.items():
+            try:
+                out = provider.generate(probe, "You reply with JSON only.", 256, 0.0)
+                results[name] = "ok" if out else "empty response"
+            except Exception as exc:
+                results[name] = f"{type(exc).__name__}: {str(exc)[:110]}"
+        return results
+
     def execute_with_fallback(
         self,
         task_type: str,
@@ -816,6 +854,8 @@ class ProviderRegistry:
             provider = self.providers.get(provider_name)
             if not provider:
                 continue
+            if provider_name in self._disabled_providers:
+                continue
 
             try:
                 result = provider.generate(prompt, system, max_tokens, temperature)
@@ -841,7 +881,15 @@ class ProviderRegistry:
                 _run_stats["total_calls"] += 1
                 _run_stats["total_errors"] += 1
                 self._record_call()
-                logger.warning(f"{provider_name} failed: {e}")
+                if self._is_dead_error(e):
+                    # Dead key or retired endpoint: stop trying it this run.
+                    self._disabled_providers[provider_name] = str(e)[:120]
+                    logger.error(
+                        "Provider %s DISABLED for this run (%s) - the key or "
+                        "endpoint is unusable, not busy", provider_name, str(e)[:90],
+                    )
+                else:
+                    logger.warning(f"{provider_name} failed: {e}")
                 continue
 
         if not results:
