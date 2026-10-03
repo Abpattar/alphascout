@@ -441,6 +441,55 @@ class OpenRouterProvider(BaseProvider):
 
 
 
+class GeminiMultiKeyProvider(BaseProvider):
+    """Round-robins a pool of Gemini keys.
+
+    Same shape as the Groq pool: on a 429 the next key is tried immediately,
+    so one exhausted key degrades throughput instead of stopping the run. This
+    matters because Gemini's per-key free-tier rate limit is the main reason
+    assessments were being dropped.
+    """
+
+    def __init__(self, api_keys: List[str], model: str = "gemini-3.1-flash-lite"):
+        if not api_keys:
+            raise ValueError("GeminiMultiKeyProvider requires at least one key")
+        self._providers = [GeminiProvider(k, model) for k in api_keys]
+        self.api_key = self._providers[0].api_key
+        self.name = f"gemini:{model}"
+        self.keys = len(self._providers)
+        self._index = 0
+
+    def generate(self, prompt, system="", max_tokens=2000, temperature=0.1):
+        last_error: Optional[Exception] = None
+        for _ in range(len(self._providers)):
+            provider = self._providers[self._index]
+            self._index = (self._index + 1) % len(self._providers)
+            try:
+                return provider.generate(prompt, system, max_tokens, temperature)
+            except RateLimitError as exc:
+                last_error = exc
+                continue
+            except Exception as exc:
+                # A dead key must not be retried for the whole run.
+                if _is_dead_key_error(exc):
+                    raise
+                last_error = exc
+                continue
+        if last_error:
+            raise last_error
+        return None
+
+    def _track_call(self, success: bool = True, error: str = ""):
+        for provider in self._providers:
+            BaseProvider._track_call(provider, success, error)
+
+
+def _is_dead_key_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in
+               ("401", "403", "400 api key", "api key not valid", "permission denied"))
+
+
 class GeminiProvider(BaseProvider):
     """Google Gemini API via REST"""
 
@@ -543,13 +592,18 @@ class ProviderRegistry:
 
         # Cerebras removed: no usable free tier (402 Payment Required).
 
-        # Gemini
-        if os.environ.get("GEMINI_API_KEY"):
+        # Gemini - pool of keys, rotated on 429
+        gemini_keys = [
+            value for key, value in os.environ.items()
+            if key == "GEMINI_API_KEY" or key.startswith("GEMINI_API_KEY_")
+        ]
+        gemini_keys = [k for k in gemini_keys if k.strip()]
+        if gemini_keys:
             try:
-                self.providers["gemini"] = GeminiProvider(
-                    os.environ["GEMINI_API_KEY"],
-                    "gemini-3.1-flash-lite"
+                self.providers["gemini"] = GeminiMultiKeyProvider(
+                    gemini_keys, "gemini-3.1-flash-lite"
                 )
+                logger.info("Gemini pool: %d key(s)", len(gemini_keys))
             except Exception as e:
                 logger.warning(f"Gemini init failed: {e}")
 

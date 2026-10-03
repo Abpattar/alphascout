@@ -7,6 +7,7 @@ import asyncio
 import aiohttp
 import feedparser
 import hashlib
+import math
 import json
 import logging
 import random
@@ -33,6 +34,9 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
+
+ENRICH_CONCURRENCY = 5
+ENRICH_FETCH_TIMEOUT = 8
 
 CONFIG_DIR = Path(__file__).parent.parent.parent / "config"
 
@@ -486,8 +490,8 @@ class NewsScraper:
         return articles
 
     async def enrich_articles(self, articles: List[Article], max_enrich: int = 15) -> List[Article]:
-        timeout = aiohttp.ClientTimeout(total=8)
-        connector = aiohttp.TCPConnector(limit=5)
+        timeout = aiohttp.ClientTimeout(total=ENRICH_FETCH_TIMEOUT)
+        connector = aiohttp.TCPConnector(limit=ENRICH_CONCURRENCY)
 
         async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
             async def enrich_one(a: Article) -> Article:
@@ -621,9 +625,21 @@ def scrape_all_sources(categories: List[str] = None, use_cache: bool = True) -> 
         return []
 
     if articles:
+        # The timeout must scale with the batch. Enrichment fetches articles at
+        # ENRICH_CONCURRENCY with an ENRICH_FETCH_TIMEOUT budget each, so a
+        # fixed 90s silently abandoned the whole batch once enrich_top_n grew -
+        # which meant the publish-date extraction never ran and undated articles
+        # stayed undated, with only a WARNING in the log.
+        enrich_batches = math.ceil(max(enrich_top_n, 1) / ENRICH_CONCURRENCY)
+        enrich_timeout = max(90, int(enrich_batches * ENRICH_FETCH_TIMEOUT * 1.5))
+        logger.info(
+            "Enriching up to %d articles (timeout %ds for %d batches)",
+            enrich_top_n, enrich_timeout, enrich_batches,
+        )
         try:
             enriched = _run_async_or_thread(
-                scraper.enrich_articles(articles, max_enrich=enrich_top_n), timeout=90
+                scraper.enrich_articles(articles, max_enrich=enrich_top_n),
+                timeout=enrich_timeout,
             )
             # Merge enrichment back into the FULL list — never let enrichment
             # shrink the article set (the pipeline only sees what we return).
