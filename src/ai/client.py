@@ -128,6 +128,12 @@ class AIClient:
                     current_prompt,
                     max_tokens=max_tokens,
                     temperature=temperature,
+                    # One agreeing provider is enough. The registry defaults to
+                    # min_agree=2, which calls up to four providers for every
+                    # single assessment - four times the rate-limit spend for a
+                    # result that is then discarded anyway. Providers still
+                    # fail over on error, which is the behaviour we want.
+                    min_agree=1,
                 )
             except Exception as exc:
                 logger.warning("AI call failed (attempt %d): %s", attempt, exc)

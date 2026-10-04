@@ -700,6 +700,7 @@ class ProviderRegistry:
         temperature: float = 0.1,
         require_ensemble: bool = False,
         ensemble_models: List[str] = None,
+        min_agree: int = 2,
     ) -> Optional[Dict]:
         """Execute a task with optional ensemble requirement"""
         if require_ensemble and ensemble_models:
@@ -723,7 +724,9 @@ class ProviderRegistry:
                 return results[0]["result"]
             return None
         else:
-            return self.execute_with_fallback(task_type, prompt, system, max_tokens, temperature)
+            return self.execute_with_fallback(
+                task_type, prompt, system, max_tokens, temperature, min_agree
+            )
 
     # ── provider circuit breaker ────────────────────────────────────────
     # A provider returning 401/402/410 is not rate-limited, it is unusable:
