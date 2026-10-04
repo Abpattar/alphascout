@@ -74,6 +74,54 @@ DEFAULT_TICKER_COOLDOWN_HOURS = 12
 # signals. Anything smaller is dropped with a reason, never priced.
 MIN_MARKET_CAP_CR = 50.0
 
+# Discovery (ask the model for company names) costs an LLM call per candidate,
+# and most candidates match no curated table, so ungated it spent more of the
+# rate-limit budget than the assessments that actually produce signals. It is
+# therefore gated on the article looking like company news, and hard-capped per
+# run.
+MAX_DISCOVERY_CALLS_PER_RUN = 6
+
+_MONEY_RE = re.compile(
+    r"(?:rs\.?|inr|₹)\s*\d|\d+\s*(?:crore|cr|lakh|million|billion)", re.I
+)
+_CATALYST_RE = re.compile(
+    r"\b(win|wins|won|award|awards|sign|signs|signed|order|orders|contract|"
+    r"acquire|acquires|acquisition|merger|stake|qip|ipo|fpo|funding|raise|"
+    r"raises|launch|launches|unveil|approves|approved|ban|bans|penalty|fine|"
+    r"resign|appoint|guidance|profit|loss|revenue|results|dividend|buyback|"
+    r"capex|expansion|plant|facility|default|insolvency|rating|downgrade)\b", re.I
+)
+# "india" is deliberately absent: it is a country and matches far too much
+# ordinary copy. Corporate identity must come from a real suffix.
+_CORPORATE_SUFFIX = re.compile(
+    r"\b(ltd|limited|industries|technologies|technology|corp|"
+    r"enterprises|systems|solutions|pharma|chemicals|motors|power|bank|"
+    r"capital|financial|fin|holdings|group|energy|infotech|soft|net|"
+    r"global|international|logistics|chemicals|alloys|steel)\b", re.I
+)
+
+
+def looks_like_company_news(article: "Candidate") -> bool:
+    """Cheap deterministic test: is this article plausibly about a company?
+
+    Runs before discovery so the model is not asked to identify companies in
+    articles that are clearly index commentary, sport or world news. Every
+    signal here is a plain regex - no LLM call.
+    """
+    text = f"{article.title} {(article.content or article.summary or '')[:600]}"
+
+    # Necessary condition: something concrete about an event or an amount.
+    # Source tier alone must never be enough - a tier-1 sports story would
+    # otherwise qualify.
+    has_event = bool(_CATALYST_RE.search(article.title))
+    has_money = bool(_MONEY_RE.search(text))
+    if not (has_event or has_money):
+        return False
+
+    # Supporting evidence that a company is involved.
+    has_corporate_word = bool(_CORPORATE_SUFFIX.search(text))
+    return has_corporate_word or article.tier <= 2
+
 # Event types that are commentary about the market rather than news about a
 # company. An analyst's "top 3 stocks to buy" is a view, not an event, and
 # acting on it means trading on someone else's opinion.
@@ -135,6 +183,9 @@ class RunStats:
         self.rejected_non_catalyst = 0
         self.rejected_non_directional = 0
         self.rejected_microcap = 0
+        self.ai_discovery_calls = 0
+        self.discovery_capped = 0
+        self.discovery_skipped_not_company = 0
         self.rejected_low_relevance = 0
         self.stories_clustered = 0
         self.stories_new = 0
@@ -173,6 +224,9 @@ class RunStats:
         logger.info("  non-catalyst       : %d", self.rejected_non_catalyst)
         logger.info("  non-directional    : %d", self.rejected_non_directional)
         logger.info("  micro-cap          : %d", self.rejected_microcap)
+        logger.info("AI discovery calls  : %d (capped %d, skipped not-company %d)",
+                    self.ai_discovery_calls, self.discovery_capped,
+                    self.discovery_skipped_not_company)
         logger.info("market data ok       : %d", self.market_ok)
         logger.info("market unavailable   : %d", self.market_unavailable)
         logger.info("validated ok         : %d", self.validated_ok)
@@ -594,9 +648,25 @@ class NewsSignalPipeline:
             return []
         self._discovery_attempted.add(candidate.story_key)
 
+        # Budget guard: discovery must not crowd out real assessments.
+        if self.stats.ai_discovery_calls >= MAX_DISCOVERY_CALLS_PER_RUN:
+            self.stats.discovery_capped += 1
+            logger.info(
+                "Discovery budget spent (%d) - not asking the model about %s",
+                MAX_DISCOVERY_CALLS_PER_RUN, candidate.title[:50],
+            )
+            return []
+
+        # Relevance guard: only ask about articles that plausibly name a company.
+        if not looks_like_company_news(candidate):
+            self.stats.discovery_skipped_not_company += 1
+            return []
+
         names = self._candidate_entity_names(haystack)
         if not names:
             return []
+
+        self.stats.ai_discovery_calls += 1
 
         logger.info(
             "No curated match; asking the model to identify companies among %s",

@@ -168,3 +168,54 @@ def test_dry_run_leaves_no_state(monkeypatch, tmp_path):
     assert store.counts()["articles"] == 0, "dry run must not persist articles"
     assert store.counts()["signals"] == 0, "dry run must not persist signals"
     assert store.sent_story_keys() == set()
+
+
+# ---------------------------------------------------------------------------
+# Discovery must not crowd out real assessments
+# ---------------------------------------------------------------------------
+
+def test_company_news_gate_rejects_non_company_story():
+    from src.pipeline.news_signal import Candidate, looks_like_company_news
+
+    def cand(title, tier=3, body=""):
+        return Candidate(title=title, url="https://x/1", canonical_url="https://x/1",
+                         source="s", tier=tier, published_at=None, content=body)
+
+    # A real company event: money + a corporate name + a catalyst verb.
+    assert looks_like_company_news(cand(
+        "Lupin wins Rs 1,000 crore USFDA approval for its new plant", tier=2))
+    # Index commentary: no company, no figure, no catalyst.
+    assert not looks_like_company_news(cand(
+        "Sensex sheds 571 points as bears tighten grip", tier=3))
+    # World news with no Indian company.
+    assert not looks_like_company_news(cand(
+        "US Fed holds rates steady, markets in Europe close higher", tier=3))
+    # Sport / general.
+    assert not looks_like_company_news(cand(
+        "India beat Australia in the second Test match", tier=1))
+
+
+def test_discovery_budget_is_capped(store):
+    """Discovery must not spend more calls than assessments need."""
+    from src.pipeline.news_signal import (
+        MAX_DISCOVERY_CALLS_PER_RUN, NewsSignalPipeline,
+    )
+    from tests.conftest import FakeAI, FakeMarketClient, MultiResolver
+
+    class AskEverything(FakeAI):
+        def ask_json(self, system, prompt, **kw):
+            if "Which of these organisations" in prompt:
+                return {"companies": []}
+            return super().ask_json(system, prompt, **kw)
+
+    articles = [
+        article(f"Company {i} Ltd wins Rs {100 + i} crore defence order for radars",
+                f"https://example.com/{i}", tier=2)
+        for i in range(12)
+    ]
+    pipeline = NewsSignalPipeline(
+        store, market=FakeMarketClient(), resolver=MultiResolver(),
+        ai=AskEverything(), max_signals=3,
+    )
+    pipeline.run(articles)
+    assert pipeline.stats.ai_discovery_calls <= MAX_DISCOVERY_CALLS_PER_RUN
