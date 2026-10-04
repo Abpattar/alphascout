@@ -58,14 +58,26 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # Loads state/*.jsonl into the store. If this fails the run aborts:
-      # running without memory would mean re-sending yesterday's news.
-      - name: Preflight (store + credentials + market session)
+      # Reports on store, credentials, market session and AI providers.
+      #
+      # Deliberately does NOT fail the job. This check once used `--health`,
+      # a flag that no longer existed after main.py was rewritten, so the
+      # whole pipeline aborted on an argparse error and sent nothing while
+      # looking like a plausible infrastructure failure.
+      #
+      # `main.py run` independently refuses to proceed without a working
+      # store, so the one condition that must stop a run is enforced where it
+      # matters, not here. Everything else is diagnostic.
+      - name: Preflight (diagnostic only)
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python main.py --health
+        run: python main.py health || echo "::warning::preflight reported problems; the run will continue and enforce its own store check"
 
       - name: Run AlphaScout
         env:
