@@ -183,6 +183,8 @@ class RunStats:
         self.rejected_non_catalyst = 0
         self.rejected_non_directional = 0
         self.rejected_microcap = 0
+        self.rejected_not_material = 0
+        self.ai_quality_rejected = 0
         self.ai_discovery_calls = 0
         self.discovery_capped = 0
         self.discovery_skipped_not_company = 0
@@ -219,9 +221,12 @@ class RunStats:
         logger.info("  duplicate          : %d", self.stories_duplicate)
         logger.info("  new development    : %d", self.stories_development)
         logger.info("candidates ranked    : %d", self.candidates_ranked)
-        logger.info("AI assessed          : %d (failed %d)", self.ai_assessed, self.ai_failed)
+        logger.info("AI assessed          : %d  (provider failures %d, quality-rejected %d)",
+                    self.ai_assessed, self.ai_failed, self.ai_quality_rejected)
         logger.info("  low relevance      : %d", self.rejected_low_relevance)
         logger.info("  non-catalyst       : %d", self.rejected_non_catalyst)
+        logger.info("  not material       : %d", self.rejected_not_material)
+        logger.info("  quality-rejected   : %d", self.ai_quality_rejected)
         logger.info("  non-directional    : %d", self.rejected_non_directional)
         logger.info("  micro-cap          : %d", self.rejected_microcap)
         logger.info("AI discovery calls  : %d (capped %d, skipped not-company %d)",
@@ -747,7 +752,15 @@ class NewsSignalPipeline:
         }
 
     # -- step 6: AI assessment (labels + prose only) ----------------------
-    def _assess(self, candidate: Candidate, context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _assess(self, candidate: Candidate, context: Dict[str, Any]):
+        """Return ``(assessment, reason)``.
+
+        ``reason`` is ``None`` on success, otherwise a short string naming why
+        the article was dropped. The caller counts these separately: a model
+        that answered "not material" is a *quality* outcome, not an AI failure,
+        and conflating the two made "AI assessed 7 (failed 7)" report a dead
+        provider chain when the model was in fact working correctly.
+        """
         quote = context["quote"]
         indicators = context["indicators"]
         market_for_prompt = {
@@ -769,15 +782,15 @@ class NewsSignalPipeline:
         )
         result = self.ai.ask_json(interpret.SYSTEM, prompt, max_tokens=1200)
         if result is None:
-            return None
+            return None, "ai_no_assessment"
 
         if not result.get("is_material", False):
+            reason = result.get("rejection_reason", "no reason given")
+            self.stats.rejected_not_material += 1
             logger.info(
-                "AI: not material (%s) - %s",
-                result.get("rejection_reason", "no reason given"),
-                candidate.title[:60],
+                "AI: not material (%s) - %s", reason, candidate.title[:60],
             )
-            return None
+            return None, "not_material"
         score = result.get("relevance_score", 0)
         try:
             score = int(score)
@@ -789,7 +802,7 @@ class NewsSignalPipeline:
                 "AI: relevance %s below the %s floor - %s",
                 score, self.min_relevance, candidate.title[:60],
             )
-            return None
+            return None, "low_relevance"
 
         event_type = str(result.get("event_type", "OTHER")).upper()
         if event_type in self.non_catalyst_events:
@@ -798,11 +811,11 @@ class NewsSignalPipeline:
                 "AI: %s is commentary, not a company catalyst - %s",
                 event_type, candidate.title[:60],
             )
-            return None
+            return None, "non_catalyst"
 
         result["relevance_score"] = score
         result["event_type"] = event_type
-        return result
+        return result, None
 
     # -- step 7: assemble + validate --------------------------------------
     def _build_signal(
@@ -988,15 +1001,22 @@ class NewsSignalPipeline:
             context["resolution"] = resolution
 
             self.stats.ai_assessed += 1
-            assessment = self._assess(candidate, context)
+            assessment, reject_reason = self._assess(candidate, context)
             if assessment is None:
-                # Usually a free-tier rate limit that survived the provider
-                # fallback chain. Recorded so the run log explains itself.
-                self.stats.ai_failed += 1
-                logger.warning(
-                    "AI produced no usable assessment for %s (%s) - not sending",
-                    resolution.ticker, getattr(self.ai, "last_error", "no reason recorded"),
-                )
+                if reject_reason == "ai_no_assessment":
+                    # The model genuinely did not answer. Usually a free-tier
+                    # rate limit surviving the provider chain.
+                    self.stats.ai_failed += 1
+                    logger.warning(
+                        "AI produced no assessment for %s (%s) - not sending",
+                        resolution.ticker,
+                        getattr(self.ai, "last_error", "") or "no reason recorded",
+                    )
+                else:
+                    self.stats.ai_quality_rejected += 1
+                    logger.info(
+                        "Quality gate rejected %s: %s", resolution.ticker, reject_reason,
+                    )
                 continue
 
             direction = (assessment.get("direction") or "NEUTRAL").upper()
